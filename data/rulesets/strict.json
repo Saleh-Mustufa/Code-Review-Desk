@@ -1,0 +1,56 @@
+{
+  "ruleset_id": "strict",
+  "name": "Strict Desk Rules",
+  "rules": [
+    {
+      "id": "REPORT-01",
+      "area": "reporting",
+      "rule": "Report only defects that must be fixed before merge; no praise, no summaries, no restating the diff."
+    },
+    {
+      "id": "REPORT-02",
+      "area": "reporting",
+      "rule": "One terse line per finding: file, line, severity, rule id, and the concrete fix — nothing else."
+    },
+    {
+      "id": "SEC-01",
+      "area": "security",
+      "rule": "Treat every hardcoded credential, key, token or connection string in the diff as critical, even in tests or demo code; demand environment configuration."
+    },
+    {
+      "id": "SEC-02",
+      "area": "security",
+      "rule": "Treat SQL, shell or path strings assembled from variables as critical injection risk until proven parameterised."
+    },
+    {
+      "id": "SEC-03",
+      "area": "security",
+      "rule": "Treat missing authorisation checks, unvalidated redirects and deserialisation of untrusted data as critical."
+    },
+    {
+      "id": "TEST-01",
+      "area": "tests",
+      "rule": "Every behaviour change in the diff must arrive with a failing-first test; flag any production change unaccompanied by test edits as major."
+    },
+    {
+      "id": "TEST-02",
+      "area": "tests",
+      "rule": "Flag any untested error path, boundary value or concurrency interaction as major."
+    },
+    {
+      "id": "STYLE-01",
+      "area": "style",
+      "rule": "Flag functions longer than 40 lines, nesting deeper than 3 levels, and dead code introduced by the diff."
+    },
+    {
+      "id": "STYLE-02",
+      "area": "style",
+      "rule": "Flag vague names (data, result, handle_stuff), bare except clauses, and mutable default arguments."
+    },
+    {
+      "id": "STYLE-03",
+      "area": "style",
+      "rule": "Flag any new public function, class or module without a docstring."
+    }
+  ]
+}

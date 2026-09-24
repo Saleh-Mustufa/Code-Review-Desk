@@ -1,0 +1,51 @@
+{
+  "ruleset_id": "default",
+  "name": "Default Desk Rules",
+  "rules": [
+    {
+      "id": "SEC-01",
+      "area": "security",
+      "rule": "Flag any hardcoded credential, API key, token, password or private key committed in the diff, and recommend moving it to environment configuration or a secret manager."
+    },
+    {
+      "id": "SEC-02",
+      "area": "security",
+      "rule": "Flag SQL built by string concatenation or f-string interpolation over variable input; require parameterised queries or bound placeholders."
+    },
+    {
+      "id": "SEC-03",
+      "area": "security",
+      "rule": "Flag eval(), exec() or pickle.loads() applied to data that crosses a trust boundary such as request input, user content or files."
+    },
+    {
+      "id": "SEC-04",
+      "area": "security",
+      "rule": "Flag subprocess or shell calls that interpolate variables into a single command string instead of passing an argument list, and flag disabled certificate or TLS verification."
+    },
+    {
+      "id": "TEST-01",
+      "area": "tests",
+      "rule": "Flag new or changed behaviour in the diff that has no corresponding test change; name the specific test case that is missing."
+    },
+    {
+      "id": "TEST-02",
+      "area": "tests",
+      "rule": "Flag tests that only execute the code without asserting on the result, and tests that restate the implementation's own logic in their assertions."
+    },
+    {
+      "id": "TEST-03",
+      "area": "tests",
+      "rule": "Flag error paths left untested by the diff: raised exceptions, empty or invalid input, and boundary values."
+    },
+    {
+      "id": "STYLE-01",
+      "area": "style",
+      "rule": "Flag dead code introduced by the diff: commented-out blocks, unreachable branches, unused imports and unused variables."
+    },
+    {
+      "id": "STYLE-02",
+      "area": "style",
+      "rule": "Flag misleading names and new public functions or classes shipped without a docstring."
+    }
+  ]
+}

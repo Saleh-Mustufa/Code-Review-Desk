@@ -1,0 +1,31 @@
+diff --git a/app/greeter.py b/app/greeter.py
+index 83db48f..bf269f4 100644
+--- a/app/greeter.py
++++ b/app/greeter.py
+@@ -1,5 +1,10 @@
+ """Small greeting helpers used by the demo CLI."""
+ 
+ 
++def build_greeting(name: str, punctuation: str = "!") -> str:
++    """Return a friendly greeting for *name*."""
++    return f"Hello, {name}{punctuation}"
++
++
+ def main() -> None:
+-    print("hi")
++    print(build_greeting("world"))
+diff --git a/tests/test_greeter.py b/tests/test_greeter.py
+index 1a2b3c4..5d6e7f8 100644
+--- a/tests/test_greeter.py
++++ b/tests/test_greeter.py
+@@ -1,7 +1,7 @@
+ """Tests for the greeter helpers."""
+ 
+-from app.greeter import main
++from app.greeter import build_greeting
+ 
+ 
+-def test_main_prints_greeting():
+-    main()
++def test_build_greeting_uses_default_punctuation():
++    assert build_greeting("desk") == "Hello, desk!"

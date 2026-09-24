@@ -1,0 +1,45 @@
+diff --git a/app/settings.py b/app/settings.py
+index 1b2d3e4..4c5d6e7 100644
+--- a/app/settings.py
++++ b/app/settings.py
+@@ -1,5 +1,7 @@
+ """Application settings loaded from the environment."""
+ 
++GEMINI_API_KEY = "sk-test-DO-NOT-USE-1234567890abcdef"
++
+-DEBUG = False
++DEBUG = True
+ ALLOWED_HOSTS = ["localhost"]
+ LOG_LEVEL = "INFO"
+diff --git a/app/store.py b/app/store.py
+index 9a8b7c6..0f1e2d3 100644
+--- a/app/store.py
++++ b/app/store.py
+@@ -12,4 +12,9 @@ class UserStore:
+     def __init__(self, conn) -> None:
+         self._conn = conn
++    def find_user(self, username: str):
++        """Return the row for *username* (query built by concatenation)."""
++        query = "SELECT id, name FROM users WHERE name = '" + username + "'"
++        return self._conn.execute(query).fetchone()
++
+     def all_users(self):
+         return self._conn.execute("SELECT id, name FROM users").fetchall()
+diff --git a/app/pricing.py b/app/pricing.py
+index 5566778..8899aab 100644
+--- a/app/pricing.py
++++ b/app/pricing.py
+@@ -1,4 +1,11 @@
+ """Pricing helpers for the demo storefront."""
+ 
+-def line_total(unit_price: int, quantity: int) -> int:
+-    return unit_price * quantity
++TAX_RATE = 0.2
++
++
++def line_total(unit_price: float, quantity: int) -> float:
++    return unit_price * quantity
++
++
++def total_with_tax(subtotal: float, discount: float = 0.0) -> float:
++    return round((subtotal - discount) * (1 + TAX_RATE), 2)
