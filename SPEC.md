@@ -81,9 +81,8 @@ the bottom), including the browser-tested UI pass.
 Setup:    python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 Test:     .venv/Scripts/python -m pytest -q
 UI:       .venv/Scripts/chainlit run app.py --port 8000
-CLI demo: .venv/Scripts/python cli.py --diff examples/three_file.diff --repo demo --language python --ruleset default
-CLI strict + cheaper re-run (FR-7):
-          .venv/Scripts/python cli.py --diff examples/three_file.diff --repo demo --language python --ruleset default --strict --model-override gemini-3.5-flash-lite
+CLI demo: .venv/Scripts/python cli.py --diff examples/three_file_issue.diff --repo demo --language python --ruleset defaultCLI strict + cheaper re-run (FR-7):
+          .venv/Scripts/python cli.py --diff examples/three_file_issue.diff --repo demo --language python --ruleset default --strict --model-override gemini-3.5-flash-lite
 ```
 
 ## Project Structure
@@ -117,13 +116,9 @@ for tools — failures become sentences the model can use, never exceptions
 @function_tool
 async def read_ruleset(ctx: RunContextWrapper[ReviewContext]) -> str:
     """Load the repository review ruleset named by the review context."""
-    try:
-        return load_ruleset(ctx.context.ruleset_id)
-    except FileNotFoundError:
-        return (
-            f"Error: ruleset '{ctx.context.ruleset_id}' could not be found. "
-            "Continue the review using your built-in judgement and say so."
-        )
+    # load_ruleset never raises: every failure already comes back as a
+    # sentence the model can act on (NFR-4). The tool only adds context.
+    return load_ruleset(ctx.context.ruleset_id)
 ```
 
 Conventions: `snake_case` modules/functions; agents named in PascalCase
