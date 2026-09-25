@@ -543,7 +543,7 @@ async def test_handoff_to_remediation_offers_the_patch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sequential_mode_emits_the_same_event_shape_in_order() -> None:
+async def test_sequential_mode_streams_one_reviewer_at_a_time() -> None:
     runner = StubRunner(default_reviewer_results())
     runner.desk_behaviour = lambda agent, input, kwargs: desk_result()
     events = await collect(
@@ -557,10 +557,56 @@ async def test_sequential_mode_emits_the_same_event_shape_in_order() -> None:
     )
     types = [type(event).__name__ for event in events]
     assert types[0] == "ReviewStarted"
-    assert types[1:4] == ["ReviewerStarted"] * 3
-    landed = [type(event).__name__ for event in events[4:7]]
-    assert landed == ["FindingsLanded"] * 3  # and in fan-out order
+    # Per-reviewer streaming: each reviewer announces, lands, then the next
+    # starts — one at a time, in fan-out order.
+    assert types[1:7] == [
+        "ReviewerStarted",
+        "FindingsLanded",
+        "ReviewerStarted",
+        "FindingsLanded",
+        "ReviewerStarted",
+        "FindingsLanded",
+    ]
+    landed = [event for event in events if isinstance(event, FindingsLanded)]
+    assert [event.reviewer for event in landed] == [
+        "SecurityReviewer",
+        "TestsReviewer",
+        "StyleReviewer",
+    ]
     assert types[-3:] == ["MergedReport", "RemediationOffered", "ReviewComplete"]
+
+
+# --- Cross-context finalization: the hardened contextvar resets --------------------
+
+
+@pytest.mark.asyncio
+async def test_abandoned_stream_finalized_in_a_fresh_context_does_not_raise() -> None:
+    """A consumer abandoning the stream leaves the generator suspended; when
+    it is finalized from a FRESH task (a different Context — the GC finalizer
+    does exactly this), the closing contextvar resets must swallow the
+    cross-context ValueError instead of crashing the finalizer."""
+
+    class ExplodingRunner:
+        """Any further run would explode — so the consumer abandons the stream."""
+
+        async def run(self, *args: object, **kwargs: object):
+            raise RuntimeError("model exploded")
+
+    gen = run_review(
+        DIFF,
+        make_ctx(),
+        runner=ExplodingRunner(),
+        reviewers_factory=stub_reviewers,
+    )
+    first = await gen.__anext__()  # the contextvar set()s ran in THIS context
+    assert isinstance(first, ReviewStarted)
+
+    async def _finalize() -> None:
+        await gen.aclose()  # resumes the body in the FRESH task's context
+
+    await asyncio.ensure_future(_finalize())  # must not raise ValueError
+    with pytest.raises(StopAsyncIteration):
+        await gen.__anext__()  # the generator is cleanly closed
 
 
 # --- DiffError propagates by design (CLI/UI catch it) -----------------------------

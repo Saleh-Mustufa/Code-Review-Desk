@@ -29,7 +29,6 @@ from collections.abc import AsyncIterator, Sequence
 from dotenv import load_dotenv
 
 from src.intake import DiffError, ReviewContext, read_diff
-from src.model_config import PRIORITY_MODEL
 from src.observe import setup_tracing
 from src.pipeline import (
     FindingsLanded,
@@ -155,6 +154,12 @@ async def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         report = await _drive_review(diff_text, ctx, args=args)
+        if report is None:
+            print("The review ended without a report — please try again.")
+            return 1
+        # The render sits inside the same guard: a report that cannot be
+        # rendered is one friendly sentence, never a traceback (NFR-4).
+        markdown = render_report_markdown(report)
     except DiffError as exc:
         print(exc.message)
         return 1
@@ -165,11 +170,8 @@ async def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    if report is None:
-        print("The review ended without a report — please try again.")
-        return 1
     print()
-    print(render_report_markdown(report))
+    print(markdown)
     return 0
 
 

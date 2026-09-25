@@ -44,7 +44,6 @@ from src import observe
 from src.intake import ReviewContext, intake
 from src.model_config import current_model_name, model_for_run
 from src.observe import (
-    LEDGER_RUNNER,
     MetricsRunHooks,
     ReviewerStats,
     WORKFLOW_NAME,
@@ -56,7 +55,6 @@ from src.review import (
     ReviewerOutcome,
     make_reviewers,
     run_reviewer,
-    run_reviewers_sequentially,
 )
 from src.specialists import (
     DESK_MAX_TURNS,
@@ -302,16 +300,27 @@ def _stats_for(
 
     The hooks' per-run usage (read off each run's own context wrapper) is the
     source of truth for tokens; the outcome's own latency backs the hooks up
-    when a custom runner did not fire them.
+    when a custom runner did not fire them. Rows follow the AGENT order (the
+    fan-out roster), not landing order, so the same review input always yields
+    the same footer.
     """
+    outcomes_by_name = {outcome.reviewer_name: outcome for outcome in outcomes}
+    # agents_by_name preserves construction order; outcomes from agents
+    # outside the roster (defensive) keep their landing order after it.
+    ordered_names = list(agents_by_name) + [
+        name for name in outcomes_by_name if name not in agents_by_name
+    ]
     rows: list[ReviewerStats] = []
-    for outcome in outcomes:
-        stats = hooks_stats.get(outcome.reviewer_name)
+    for name in ordered_names:
+        outcome = outcomes_by_name.get(name)
+        if outcome is None:
+            continue
+        stats = hooks_stats.get(name)
         if stats is None:
-            stats = ReviewerStats(reviewer_name=outcome.reviewer_name)
+            stats = ReviewerStats(reviewer_name=name)
         if not stats.latency_ms and outcome.latency_ms is not None:
             stats.latency_ms = outcome.latency_ms
-        agent = agents_by_name.get(outcome.reviewer_name)
+        agent = agents_by_name.get(name)
         stats.model = stats.model or _model_label(agent, model_override)
         rows.append(stats)
     return rows
@@ -424,6 +433,13 @@ async def run_review(
     Raises:
         DiffError: from intake on empty/malformed diffs — callers catch it and
             render ``.message``; no event stands in for a validation problem.
+
+    Note:
+        Consumers should drain the generator (or close it promptly); the
+        closing contextvar resets are hardened, so a generator finalized in a
+        different Context — e.g. a UI consumer abandoning the stream — can
+        never crash, and at worst a stale context retains the planted
+        patterns.
     """
     chosen_runner = runner if runner is not None else getattr(observe, "LEDGER_RUNNER", Runner)
     request_id = f"rev_{_secrets.token_hex(4)}"
@@ -480,29 +496,29 @@ async def run_review(
 
             # Launch every reviewer, then announce them; findings stream as they land.
             if mode == "sequential":
+                # One reviewer at a time, still streaming: announce one
+                # reviewer, run it, yield its findings, then move to the next.
                 for agent in agents:
                     yield ReviewerStarted(reviewer=agent.name)
-                try:
-                    outcomes = list(
-                        await run_reviewers_sequentially(
-                            agents,
+                    try:
+                        outcome = await run_reviewer(
+                            agent,
                             full_diff,
                             ctx,
                             runner=chosen_runner,
                             run_config=_build_run_config(request_id, model_override),
                         )
+                    except OutputGuardrailTripwireTriggered as trip:
+                        refusal_reason, masked_text = _refusal_from_trip(trip)
+                        break
+                    outcomes.append(outcome)
+                    yield FindingsLanded(
+                        reviewer=outcome.reviewer_name,
+                        findings=outcome.findings,
+                        partial=outcome.partial,
+                        partial_reason=outcome.partial_reason,
+                        latency_ms=outcome.latency_ms,
                     )
-                except OutputGuardrailTripwireTriggered as trip:
-                    refusal_reason, masked_text = _refusal_from_trip(trip)
-                else:
-                    for outcome in outcomes:
-                        yield FindingsLanded(
-                            reviewer=outcome.reviewer_name,
-                            findings=outcome.findings,
-                            partial=outcome.partial,
-                            partial_reason=outcome.partial_reason,
-                            latency_ms=outcome.latency_ms,
-                        )
             else:
                 tasks = [
                     asyncio.ensure_future(_guarded_reviewer(agent)) for agent in agents
@@ -515,6 +531,14 @@ async def run_review(
                         refusal_reason, masked_text = _refusal_from_trip(landed)
                         for task in tasks:
                             task.cancel()
+                        # Retrieve every straggler's result — some may have
+                        # finished with the sentinel or a real exception just
+                        # before the cancel landed — so nothing later surfaces
+                        # the "Task exception was never retrieved" noise.
+                        try:
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                        except Exception:  # noqa: BLE001 - cleanup is best-effort
+                            pass
                         break
                     outcomes.append(landed)
                     yield FindingsLanded(
@@ -640,6 +664,17 @@ async def run_review(
             report.footer = render_footer(report)
             yield ReviewComplete(report=report)
     finally:
-        current_run_hooks.reset(hooks_token)
+        # Cross-context hardening: an async generator finalized in a different
+        # Context than the one where set() ran (e.g. a UI consumer abandoning
+        # the stream) makes ContextVar.reset(token) raise ValueError. Swallow
+        # it — an abandoned stream must not crash its finalizer; a stale
+        # context then merely retains the planted patterns (see docstring).
+        try:
+            current_run_hooks.reset(hooks_token)
+        except ValueError:
+            pass
         if isinstance(planted_token, contextvars.Token):
-            reset_current_secrets(planted_token)
+            try:
+                reset_current_secrets(planted_token)
+            except ValueError:
+                pass
