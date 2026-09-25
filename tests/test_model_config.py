@@ -16,6 +16,7 @@ import httpx2
 import openai
 import pytest
 from agents import Model, ModelResponse, ModelSettings, ModelTracing, Usage, UserError
+from agents.agent_output import AgentOutputSchemaBase
 from agents.models import _openai_shared
 
 from src import model_config
@@ -73,6 +74,8 @@ class StubModel(Model):
         self.name = name
         self.outcomes = list(outcomes)
         self.calls: list[Any] = []
+        self.settings: list[Any] = []
+        self.schemas: list[Any] = []
 
     async def get_response(
         self,
@@ -89,6 +92,8 @@ class StubModel(Model):
         prompt: Any,
     ) -> ModelResponse:
         self.calls.append(input)
+        self.settings.append(model_settings)
+        self.schemas.append(output_schema)
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
         if isinstance(outcome, BaseException):
             raise outcome
@@ -109,6 +114,8 @@ class StubModel(Model):
         prompt: Any,
     ) -> Any:
         self.calls.append(input)
+        self.settings.append(model_settings)
+        self.schemas.append(output_schema)
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
         if isinstance(outcome, BaseException):
             raise outcome
@@ -432,3 +439,164 @@ async def test_current_model_name_helper():
     assert model_config.current_model_name(model) == CHAIN_A
     underlying = model_config._underlying_model("gemini-3.6-flash")
     assert model_config.current_model_name(underlying) == "gemini-3.6-flash"
+
+
+# ---------------------------------------------------------------------------
+# First-turn mediation: forced tool call vs structured output (Gemini 400)
+# ---------------------------------------------------------------------------
+
+
+class FakeOutputSchema(AgentOutputSchemaBase):
+    """Minimal output-schema stand-in: mediation must only ever drop or keep it."""
+
+    def __init__(self, name: str = "findings") -> None:
+        self._name = name
+
+    def is_plain_text(self) -> bool:
+        return False
+
+    def name(self) -> str:
+        return self._name
+
+    def json_schema(self) -> dict[str, Any]:
+        return {"type": "object"}
+
+    def is_strict_json_schema(self) -> bool:
+        return True
+
+    def validate_json(self, json_str: str) -> Any:
+        return json_str
+
+
+def _turn2_input() -> list[dict[str, Any]]:
+    """A later-turn input: user message, the forced function_call, its output."""
+    return [
+        {"type": "message", "role": "user", "content": "review this diff"},
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "read_ruleset",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": "rules text"},
+    ]
+
+
+async def _call_with_schema(
+    model: Model,
+    *,
+    settings: ModelSettings,
+    input_items: Any = "review this diff",
+    schema: Any,
+):
+    return await model.get_response(
+        None, input_items, settings, [], schema, [], ModelTracing.DISABLED, **CALL_KWARGS
+    )
+
+
+def test_input_tool_history_detection():
+    assert model_config._input_has_tool_history("a plain diff") is False
+    assert (
+        model_config._input_has_tool_history(
+            [{"type": "message", "role": "user", "content": "review"}]
+        )
+        is False
+    )
+    assert (
+        model_config._input_has_tool_history(
+            [{"type": "function_call", "call_id": "c", "name": "t", "arguments": "{}"}]
+        )
+        is True
+    )
+    assert (
+        model_config._input_has_tool_history(
+            [{"type": "function_call_output", "call_id": "c", "output": "o"}]
+        )
+        is True
+    )
+
+
+async def test_first_turn_mediation_drops_schema_keeps_forced_tool_choice():
+    """Turn 1 with tool_choice="required" + a schema: the underlying request
+    must lose the response_format (Gemini 400 fix) but keep the forcing."""
+    schema = FakeOutputSchema()
+    answer = _ok_response("resp-med")
+    model, stubs = _failover({CHAIN_A: [answer]})
+    forced = ModelSettings(tool_choice="required")
+
+    response = await _call_with_schema(model, settings=forced, schema=schema)
+
+    assert response is answer
+    assert stubs[CHAIN_A].calls == ["review this diff"]
+    assert stubs[CHAIN_A].schemas == [None]  # response_format dropped on turn 1
+    assert stubs[CHAIN_A].settings[0].tool_choice == "required"  # forcing intact
+
+
+async def test_mediation_forwards_schema_once_tool_history_exists():
+    """Turn 2+: the run already did tool I/O, so structured output is forwarded."""
+    schema = FakeOutputSchema()
+    model, stubs = _failover({CHAIN_A: [_ok_response("resp-t2")]})
+    forced = ModelSettings(tool_choice="required")
+
+    await _call_with_schema(
+        model, settings=forced, input_items=_turn2_input(), schema=schema
+    )
+
+    assert stubs[CHAIN_A].schemas == [schema]  # original schema, unchanged
+    assert stubs[CHAIN_A].calls == [_turn2_input()]
+
+
+async def test_no_forced_tool_choice_is_never_mediated():
+    """Desk/Merge/Remediation agents (no tool_choice, or auto/none) must never
+    lose their first-turn schema — their first turn IS the structured turn."""
+    schema = FakeOutputSchema()
+    model, stubs = _failover({CHAIN_A: [_ok_response()]})
+
+    await _call_with_schema(model, settings=ModelSettings(), schema=schema)
+    await _call_with_schema(
+        model, settings=ModelSettings(tool_choice="auto"), schema=schema
+    )
+    await _call_with_schema(
+        model, settings=ModelSettings(tool_choice="none"), schema=schema
+    )
+
+    assert stubs[CHAIN_A].schemas == [schema, schema, schema]
+
+
+async def test_failover_still_switches_on_429_with_mediation_active():
+    """The mediation wraps each attempt inside the failover loop: a rate-limited
+    first turn still advances the chain, mediated, with usage recorded."""
+    schema = FakeOutputSchema()
+    answer = _ok_response("resp-b")
+    model, stubs = _failover(
+        {CHAIN_A: [_api_error(429, "quota exceeded")], CHAIN_B: [answer]}
+    )
+    forced = ModelSettings(tool_choice="required")
+
+    response = await _call_with_schema(model, settings=forced, schema=schema)
+
+    assert response is answer
+    assert model.switch_count == 1
+    assert stubs[CHAIN_A].schemas == [None]  # failed attempt was mediated too
+    assert stubs[CHAIN_B].schemas == [None]  # switched attempt mediated as well
+    assert stubs[CHAIN_B].settings[0].tool_choice == "required"
+    assert model.usage["per_model"][CHAIN_A] == {"requests": 1, "succeeded": 0, "failed": 1}
+    assert model.usage["per_model"][CHAIN_B] == {"requests": 1, "succeeded": 1, "failed": 0}
+
+
+async def test_stream_response_mediation_drops_schema_on_first_turn():
+    """stream_response forwards the same way, so it mediates identically."""
+    schema = FakeOutputSchema()
+    model, stubs = _failover({CHAIN_A: [_ok_response()]})
+    forced = ModelSettings(tool_choice="required")
+
+    events = [
+        event
+        async for event in model.stream_response(
+            None, "diff", forced, [], schema, [], ModelTracing.DISABLED, **CALL_KWARGS
+        )
+    ]
+
+    assert events  # the stream still yields its event
+    assert stubs[CHAIN_A].schemas == [None]
+    assert stubs[CHAIN_A].settings[0].tool_choice == "required"

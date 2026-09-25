@@ -2,9 +2,11 @@
 
 All model traffic in Code Review Desk flows through this module. It owns the
 Gemini rate-limit table, the failover chain, the one explicit Gemini client,
-per-model usage tracking, and the helpers other modules use to obtain a model.
-No other module may hardcode a model name, and no global default OpenAI
-client is ever set here (the SDK default stays untouched).
+per-model usage tracking, the first-turn forced-tool/structured-output
+mediation (see :func:`_mediated_first_turn_output_schema`), and the helpers
+other modules use to obtain a model. No other module may hardcode a model
+name, and no global default OpenAI client is ever set here (the SDK default
+stays untouched).
 """
 
 from __future__ import annotations
@@ -117,6 +119,114 @@ def is_failover_trigger(exc: BaseException) -> bool:
     return any(marker in text for marker in _FAILOVER_MESSAGE_MARKERS)
 
 
+# --- First-turn mediation: forced tool call vs structured output ---
+#
+# Gemini's OpenAI-compatible endpoint rejects a single request that carries
+# BOTH a forced tool choice ("required" -> forced function calling, ANY mode)
+# and a JSON response format: 400 "Forced function calling (ANY mode) with a
+# response mime type: 'application/json' is unsupported". The SDK's
+# chat-completions model puts both on the run's FIRST request whenever an agent
+# combines ModelSettings(tool_choice="required") (FR-9, forced ruleset call)
+# with output_type=list[Finding] (FR-3). The SDK's reset_tool_choice only
+# clears tool_choice for requests AFTER the first tool turn, so the conflict is
+# first-turn-only. The router mediates: on a run's first turn it drops the
+# output schema (no response_format) while keeping tool_choice, so Gemini
+# forces the ruleset call as designed; from the second request onward the
+# schema is forwarded unchanged and structured output works again.
+
+# The input-item ``type`` values that mean "this run has already done tool
+# I/O" (the SDK's TResponseInputItem discriminated unions: function calls and
+# their outputs, plus the hosted/computer/shell/MCP tool variants).
+_TOOL_ITEM_TYPES = frozenset(
+    {
+        "function_call",
+        "function_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "computer_call",
+        "computer_call_output",
+        "local_shell_call",
+        "local_shell_call_output",
+        "shell_call",
+        "shell_call_output",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "mcp_approval_response",
+        "web_search_call",
+        "file_search_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "tool_search_call",
+        "apply_patch_call",
+        "apply_patch_call_output",
+        "hosted_tool_call",
+    }
+)
+
+
+def _is_forced_tool_choice(tool_choice: Any) -> bool:
+    """Whether ``tool_choice`` FORCES a tool call this turn ("required", etc.).
+
+    ``"auto"`` and ``"none"`` leave the model free not to call a tool, so
+    dropping the schema there could strand a first-turn final answer without
+    structured output; mediation exists only for forced first turns.
+    """
+    if tool_choice is None:
+        return False
+    if tool_choice == "auto" or tool_choice == "none":
+        return False
+    return True
+
+
+def _input_has_tool_history(input: str | list[TResponseInputItem]) -> bool:
+    """Whether the input already carries tool-call/tool-output items.
+
+    A plain string input (or an items list with only messages) is the model's
+    first turn of the run; any tool item means a later turn.
+    """
+    if not isinstance(input, list):
+        return False
+    for item in input:
+        if isinstance(item, dict):
+            item_type = item.get("type")
+        else:  # defensive: SDK item objects instead of their dict shapes
+            item_type = getattr(item, "type", None)
+        if isinstance(item_type, str) and item_type in _TOOL_ITEM_TYPES:
+            return True
+    return False
+
+
+def _mediated_first_turn_output_schema(
+    model_settings: ModelSettings,
+    input: str | list[TResponseInputItem],
+    output_schema: AgentOutputSchemaBase | None,
+) -> AgentOutputSchemaBase | None:
+    """Gemini OpenAI-compat mediation for the forced-first-turn conflict.
+
+    When the settings force a tool call AND the run is still on its first turn
+    (no tool-call/tool-output items in the input), the schema is dropped so the
+    request carries ``tool_choice`` WITHOUT a JSON response format — the one
+    combination Gemini rejects. Every other request is forwarded unchanged:
+
+    - agents without a forced tool choice (Desk/Merge/Remediation) are never
+      mediated — their first turn IS their final structured turn;
+    - from turn 2 onward (tool history present) the schema is forwarded, and
+      the SDK's ``reset_tool_choice`` has already cleared tool_choice there.
+
+    The result is what the router passes to ONE underlying attempt; the caller
+    applies it inside the failover loop, so failover and usage tracking are
+    unaffected.
+    """
+    if output_schema is None:
+        return None
+    if not _is_forced_tool_choice(model_settings.tool_choice):
+        return output_schema
+    if _input_has_tool_history(input):
+        return output_schema
+    return None
+
+
 @dataclass
 class ModelUsage:
     """Per-model call counters tracked by the router."""
@@ -183,12 +293,15 @@ class FailoverModel(Model):
     """An SDK Model that transparently fails over down the chain.
 
     get_response (and stream_response, until the first event) delegate to the
-    underlying model for the current chain position. On a failover trigger the
-    router advances to the next chain model, puts the failed model on cooldown,
-    records usage, and retries - the caller (and the agent holding this
-    object) never sees the switch. The position persists across calls, so a
-    mid-run switch is visible to every subsequent call. Only when every model
-    in the chain fails does it raise ModelChainExhausted.
+    underlying model for the current chain position, with one mediation: a
+    run's FIRST forced-tool turn goes out without the output schema (the
+    Gemini OpenAI-compat first-turn conflict, resolved at the router — see the
+    module-level note and :func:`_mediated_first_turn_output_schema`). On a
+    failover trigger the router advances to the next chain model, puts the
+    failed model on cooldown, records usage, and retries - the caller (and the
+    agent holding this object) never sees the switch. The position persists
+    across calls, so a mid-run switch is visible to every subsequent call.
+    Only when every model in the chain fails does it raise ModelChainExhausted.
     """
 
     def __init__(
@@ -278,13 +391,20 @@ class FailoverModel(Model):
             name = self.current_name
             usage = self._usage_for(name)
             usage.requests += 1
+            # Gemini OpenAI-compat mediation, applied per attempt inside the
+            # failover loop: a first forced-tool turn goes out without the
+            # output schema (see the module-level mediation note). Failover,
+            # cooldowns and usage tracking are untouched.
+            turn_output_schema = _mediated_first_turn_output_schema(
+                model_settings, input, output_schema
+            )
             try:
                 response = await self._models_factory(name).get_response(
                     system_instructions,
                     input,
                     model_settings,
                     tools,
-                    output_schema,
+                    turn_output_schema,
                     handoffs,
                     tracing,
                     previous_response_id=previous_response_id,
@@ -331,12 +451,17 @@ class FailoverModel(Model):
             name = self.current_name
             usage = self._usage_for(name)
             usage.requests += 1
+            # Same mediation as get_response: streams carry it per attempt too,
+            # so a first forced-tool turn never ships the JSON mime type.
+            turn_output_schema = _mediated_first_turn_output_schema(
+                model_settings, input, output_schema
+            )
             iterator = self._models_factory(name).stream_response(
                 system_instructions,
                 input,
                 model_settings,
                 tools,
-                output_schema,
+                turn_output_schema,
                 handoffs,
                 tracing,
                 previous_response_id=previous_response_id,
