@@ -15,7 +15,7 @@
     {
       "id": "SEC-01",
       "area": "security",
-      "rule": "Treat every hardcoded credential, key, token or connection string in the diff as critical, even in tests or demo code; demand environment configuration."
+      "rule": "Treat every hardcoded credential, key, token or connection string in the diff as critical, even in tests or demo code; demand environment configuration. Quote the offending line verbatim."
     },
     {
       "id": "SEC-02",

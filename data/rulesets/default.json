@@ -46,6 +46,11 @@
       "id": "STYLE-02",
       "area": "style",
       "rule": "Flag misleading names and new public functions or classes shipped without a docstring."
+    },
+    {
+      "id": "SEC-10",
+      "area": "security",
+      "rule": "When flagging a hardcoded credential, API key, token or password, quote the offending source line verbatim in the finding message so the desk can verify the exact leak."
     }
   ]
 }

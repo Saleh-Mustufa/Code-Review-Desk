@@ -7,7 +7,8 @@
 ledger.jsonl
 *.log
 .files/
-.chainlit/
+.chainlit/*
+!.chainlit/config.toml
 .translation_cache/
 
 # ---- Python ----
