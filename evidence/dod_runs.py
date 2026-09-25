@@ -34,6 +34,7 @@ from src.pipeline import (  # noqa: E402
     FindingsLanded,
     GuardrailRefused,
     MergedReport,
+    PartialReview,
     RemediationOffered,
     ReviewComplete,
     ReviewReport,
@@ -72,6 +73,8 @@ async def drive(diff_text: str, ctx: ReviewContext, **kwargs) -> tuple[ReviewRep
                 f"  <- {event.reviewer} landed: {len(event.findings)} finding(s)"
                 + (" [PARTIAL]" if event.partial else "")
             )
+        elif isinstance(event, PartialReview):
+            say(f"  !! PARTIAL REVIEW — {event.reviewer}: {event.reason}")
         elif isinstance(event, MergedReport):
             say(f"  <- merged: {len(event.findings)} finding(s) after dedupe/order")
         elif isinstance(event, RemediationOffered) and event.escalation is not None:
