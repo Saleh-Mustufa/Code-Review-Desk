@@ -14,9 +14,6 @@
 :root {
   --desk-accent: #6d5dfc;
   --desk-accent-soft: rgba(109, 93, 252, 0.12);
-  --desk-critical: #e5484d;
-  --desk-major: #f5a623;
-  --desk-minor: #e2c035;
   --desk-radius: 14px;
 }
 

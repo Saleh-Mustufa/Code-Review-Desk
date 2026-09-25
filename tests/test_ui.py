@@ -76,6 +76,8 @@ class FakeMessage:
         self.elements = list(elements or [])
         self.send_count = 0
         self.update_count = 0
+        # Every content the message ever had (updates mutate in place).
+        self.history: list[str] = [content]
 
     async def send(self):
         self.send_count += 1
@@ -84,6 +86,7 @@ class FakeMessage:
 
     async def update(self):
         self.update_count += 1
+        self.history.append(self.content)
         return True
 
 
@@ -312,6 +315,20 @@ def test_status_review_started():
     assert "normal mode" in status
 
 
+def test_status_review_started_surfaces_review_number():
+    event = ReviewStarted(
+        request_id="rev_x",
+        context=ReviewContext(repo="demo", language="python", ruleset_id="default"),
+        n_chunks=1,
+    )
+    status = app_module.format_status(event, {"review_number": 2})
+    assert status is not None
+    assert "Review #2 for repo `demo`" in status
+    assert "1 file chunk(s)" in status
+    # Without the state dict the line stays graceful (no "#None").
+    assert "#" not in app_module.format_status(event)
+
+
 def test_status_reviewer_started_counts_running():
     state: dict = {}
     first = app_module.format_status(ReviewerStarted(reviewer="SecurityReviewer"), state)
@@ -523,6 +540,8 @@ async def test_handle_message_progressive_messages_and_session_state(monkeypatch
     # Status was updated along the way; its final content says complete.
     assert sent[0].update_count >= 4
     assert "Review complete" in sent[0].content
+    # review_count is surfaced: the first status line said "Review #1".
+    assert any("Review #1" in c for c in sent[0].history)
     # FR-12 session state: context stored, count incremented, report remembered.
     assert session.store["review_count"] == 1
     assert session.store["context"] is ctx_used
@@ -712,3 +731,118 @@ async def test_session_lock_serialises_reviews(monkeypatch):
     # Each review ran start→end with no interleave: the lock serialised them.
     assert overlap == ["start", "end", "start", "end"]
     assert stream.calls and stream.finally_ran
+
+
+@pytest.mark.asyncio
+async def test_session_lock_fallback_is_created_and_stored(monkeypatch):
+    _, session = install_fake_cl(monkeypatch)
+    stream = FakeStream(_events_for_review(make_report(), [], []))
+    monkeypatch.setattr(app_module, "run_review", stream)
+    assert app_module.SESSION_LOCK not in session.store  # no seed ran
+
+    # Two messages racing before on_chat_start: the first stores ONE lock...
+    await asyncio.gather(
+        app_module._handle_message(SimpleNamespace(content=VALID_DIFF)),
+        app_module._handle_message(SimpleNamespace(content=VALID_DIFF)),
+    )
+    stored = session.store[app_module.SESSION_LOCK]
+    assert isinstance(stored, asyncio.Lock)
+
+    # ...and a later message REUSES that same stored lock (never a new one).
+    await app_module._handle_message(SimpleNamespace(content=VALID_DIFF))
+    assert session.store[app_module.SESSION_LOCK] is stored
+
+
+@pytest.mark.asyncio
+async def test_body_raise_closes_generator_deterministically(monkeypatch, capsys):
+    """The drain contract when the LOOP BODY raises, not the generator.
+
+    A card .send() failing on a client disconnect must not leave the
+    run_review generator suspended until asyncgen GC: aclose() in the
+    handler's finally runs the generator's cleanup (contextvar resets) NOW.
+    """
+    install_fake_cl(monkeypatch)
+    stream = FakeStream(
+        [
+            ReviewStarted(
+                request_id="rev_x",
+                context=ReviewContext(repo="pasted-diff", language="python", ruleset_id="default"),
+                n_chunks=1,
+            ),
+            ReviewerStarted(reviewer="SecurityReviewer"),
+        ]
+    )
+    monkeypatch.setattr(app_module, "run_review", stream)
+
+    async def disconnect(event, status, state):
+        raise RuntimeError("client disconnected mid-review")
+
+    monkeypatch.setattr(app_module, "_handle_event", disconnect)
+
+    await app_module.on_message(SimpleNamespace(content=VALID_DIFF))
+
+    # The generator was suspended at a yield when the body raised; the
+    # handler's finally closed it, so its cleanup ALREADY ran.
+    assert stream.finally_ran
+    # The user still sees exactly ONE friendly sentence (no traceback).
+    friendly = [m for m in FakeMessage.sent if "could not be completed" in m.content]
+    assert len(friendly) == 1
+    assert "RuntimeError" in friendly[0].content
+    assert "client disconnected" not in friendly[0].content
+    assert "client disconnected" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_on_chat_start_seeds_state_and_sends_welcome(monkeypatch, capsys):
+    _, session = install_fake_cl(monkeypatch)
+
+    await app_module.on_chat_start()
+
+    assert session.store[app_module.SESSION_REVIEW_COUNT] == 0
+    assert session.store[app_module.SESSION_CONTEXT] is None
+    assert session.store[app_module.SESSION_LAST_REPORT] is None
+    assert isinstance(session.store[app_module.SESSION_LOCK], asyncio.Lock)
+    # Exactly one welcome message, explaining the desk and the diff paste.
+    assert len(FakeMessage.sent) == 1
+    welcome = FakeMessage.sent[0].content
+    assert "Code Review Desk" in welcome
+    assert "unified diff" in welcome
+    assert "reuses those settings" in welcome
+
+
+@pytest.mark.asyncio
+async def test_partial_review_reaches_status_and_card(monkeypatch):
+    _, _ = install_fake_cl(monkeypatch)
+    reason = "The reviewer hit its turn ceiling of 4 turns; findings may be incomplete."
+    events = [
+        ReviewStarted(
+            request_id="rev_x",
+            context=ReviewContext(repo="pasted-diff", language="python", ruleset_id="default"),
+            n_chunks=1,
+        ),
+        ReviewerStarted(reviewer="QualityReviewer"),
+        FindingsLanded(
+            reviewer="QualityReviewer",
+            findings=[make_finding("major")],
+            partial=True,
+            partial_reason=reason,
+            latency_ms=400.0,
+        ),
+        PartialReview(reviewer="QualityReviewer", reason=reason),
+        MergedReport(findings=[make_finding("major")]),
+        RemediationOffered(escalation=None, text="No remediation needed."),
+        ReviewComplete(report=make_report(findings=[make_finding("major")])),
+    ]
+    stream = FakeStream(events)
+    monkeypatch.setattr(app_module, "run_review", stream)
+
+    await app_module._handle_message(SimpleNamespace(content=VALID_DIFF))
+
+    cards = [m for m in FakeMessage.sent if "— findings:" in m.content or "partial review" in m.content]
+    assert len(cards) == 1
+    assert "partial review" in cards[0].content
+    assert reason in cards[0].content  # the card footnote carries the reason
+    # The status message mentioned it too, along the way.
+    status_history = "\n".join(FakeMessage.sent[0].history)
+    assert "PARTIAL" in status_history
+    assert "Partial review" in status_history

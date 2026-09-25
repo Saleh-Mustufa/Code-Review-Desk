@@ -188,15 +188,19 @@ def format_status(event: object, state: dict | None = None) -> str | None:
     """The progressive status line for one pipeline event (FR-12).
 
     Returns ``None`` when the event should not touch the status message.
-    ``state`` is a dict the caller keeps for the whole review; the
+    ``state`` is a dict the caller keeps for the whole review: the
     ``ReviewerStarted`` branch counts launched reviewers in it so the desk
-    can say "3 reviewers running…".
+    can say "3 reviewers running…", and the ``ReviewStarted`` branch reads
+    the optional ``review_number`` key to say "Review #N for repo …".
     """
     if isinstance(event, ReviewStarted):
-        return (
+        body = (
             f"Splitting diff… {event.n_chunks} file chunk(s) · "
             f"repo `{event.context.repo}` · {event.context.strictness} mode."
         )
+        if state is not None and state.get("review_number"):
+            return f"Review #{state['review_number']} for repo `{event.context.repo}` — {body}"
+        return body
     if isinstance(event, ReviewerStarted):
         running = 0
         if state is not None:
@@ -380,9 +384,10 @@ async def _handle_message(message: cl.Message) -> None:
     """The review flow for one pasted message, behind the session lock.
 
     The pipeline generator is driven with a single ``async for`` to
-    EXHAUSTION on every path (never ``break``, never abandoned): DiffError
-    and unexpected errors propagate out of the loop and the generator closes
-    itself, so its ``finally`` always resets the planted-secret contextvars.
+    EXHAUSTION on the success path (never ``break``, never abandoned); the
+    ``finally`` closes it deterministically on EVERY path — DiffError, a
+    loop-body raise, or normal exhaustion — so its contextvar resets always
+    run at the end of this handler, never "eventually" at asyncgen GC.
     """
     text = message.content or ""
     if not text.strip():
@@ -394,8 +399,14 @@ async def _handle_message(message: cl.Message) -> None:
         ).send()
         return
 
-    # Serialize reviews per session (session-state race protection).
-    lock: asyncio.Lock = cl.user_session.get(SESSION_LOCK) or asyncio.Lock()
+    # Serialize reviews per session (session-state race protection). If two
+    # messages race before on_chat_start's seed task ran, the FIRST one to
+    # get here creates the lock AND stores it — a lock created without being
+    # stored would not serialize anything.
+    lock: asyncio.Lock = cl.user_session.get(SESSION_LOCK)
+    if lock is None:
+        lock = asyncio.Lock()
+        cl.user_session.set(SESSION_LOCK, lock)
     async with lock:
         diff_text, overrides = parse_desk_directive(text)
         if not diff_text.strip():
@@ -416,18 +427,30 @@ async def _handle_message(message: cl.Message) -> None:
 
         status = cl.Message(content="Starting review…")
         await status.send()
-        state: dict = {"reviewers_started": 0}
+        state: dict = {"reviewers_started": 0, "review_number": review_count}
+        gen = run_review(diff_text, ctx)
         try:
-            # ONE async-for, driven to exhaustion — always.
-            async for event in run_review(diff_text, ctx):
+            # ONE async-for, driven to exhaustion on the success path — always.
+            async for event in gen:
                 await _handle_event(event, status, state)
         except DiffError as exc:
             status.content = "Stopped — the diff needs a fix before a review can run."
             await status.update()
             await cl.Message(content=exc.message).send()
             return
+        finally:
+            # The drain contract, made deterministic: a generator abandoned
+            # SUSPENDED (the loop body raised — e.g. a card send failed on a
+            # client disconnect) would otherwise wait for asyncgen GC
+            # finalization before its finally could reset the planted-secret
+            # contextvars. aclose() is a no-op on an exhausted/closed
+            # generator and closes a suspended one NOW, so the resets always
+            # run at the end of this handler, never "eventually".
+            await gen.aclose()
 
-        # The stream ended without a report (should not happen; stay friendly).
+        # A fully drained stream always ended with ReviewComplete, so the
+        # report is stored; if one somehow ended without it, say so instead
+        # of going silent (the DiffError path returned above).
         if cl.user_session.get(SESSION_LAST_REPORT) is None:
             status.content = "The review ended without a report — please try again."
             await status.update()
