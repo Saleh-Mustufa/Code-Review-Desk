@@ -1,0 +1,70 @@
+/* Code Review Desk — custom Chainlit theme additions (Task 6).
+ *
+ * Loaded via `[UI] custom_css = "/public/styles.css"` in .chainlit/config.toml;
+ * chainlit serves this file at /public/styles.css and injects the <link> tag.
+ *
+ * Targets only stable chainlit classes (verified in the shipped frontend
+ * bundle: `.message-content`, plus generic element surfaces) and degrades to
+ * no-ops if a class is renamed — every rule is additive styling, never layout
+ * that could hide content. Markdown (not raw HTML) carries the severity
+ * badges (🔴 CRITICAL / 🟠 MAJOR / 🟡 MINOR), so the theme stays safe with
+ * `unsafe_allow_html = false`.
+ */
+
+:root {
+  --desk-accent: #6d5dfc;
+  --desk-accent-soft: rgba(109, 93, 252, 0.12);
+  --desk-critical: #e5484d;
+  --desk-major: #f5a623;
+  --desk-minor: #e2c035;
+  --desk-radius: 14px;
+}
+
+/* Chat background: a whisper of the desk accent behind the conversation. */
+body {
+  background-image: radial-gradient(
+    1200px 600px at 15% -10%,
+    var(--desk-accent-soft),
+    transparent 60%
+  );
+}
+
+/* Rounded, softly-shadowed message cards. */
+.message-content {
+  border-radius: var(--desk-radius);
+  box-shadow: 0 1px 3px rgba(15, 15, 35, 0.12);
+  border: 1px solid rgba(109, 93, 252, 0.14);
+}
+
+/* Monospace for inline code and fenced blocks (diffs, patches). */
+.message-content code,
+.message-content pre {
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, "SF Mono", monospace;
+}
+
+.message-content pre {
+  border-radius: 10px;
+  border: 1px solid rgba(109, 93, 252, 0.18);
+}
+
+/* Severity accents for the markdown badge lines inside finding cards. */
+.message-content strong {
+  letter-spacing: 0.01em;
+}
+
+/* Blockquote footnotes (partial-review reasons) read as marginalia. */
+.message-content blockquote {
+  border-left: 3px solid var(--desk-major);
+  padding-left: 0.75rem;
+  opacity: 0.92;
+  font-size: 0.95em;
+}
+
+/* Measurement tables (the FR-10 footer) get a tidy header accent. */
+.message-content table {
+  border-collapse: collapse;
+}
+
+.message-content table th {
+  border-bottom: 2px solid var(--desk-accent);
+}
