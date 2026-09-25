@@ -12,6 +12,7 @@
  */
 
 :root {
+  --desk-major: #f5a623;
   --desk-accent: #6d5dfc;
   --desk-accent-soft: rgba(109, 93, 252, 0.12);
   --desk-radius: 14px;
