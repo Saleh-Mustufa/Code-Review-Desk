@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from agents import MaxTurnsExceeded, RunContextWrapper
+from agents import MaxTurnsExceeded, ModelBehaviorError, RunContextWrapper
 from agents.agent_output import AgentOutputSchema
 from agents.run_error_handlers import RunErrorHandlerInput
 from agents.tool_context import ToolContext
@@ -27,6 +27,7 @@ from src.review import (
     REVIEWER_MAX_TURNS,
     Finding,
     ReviewerOutcome,
+    _invalid_output_handler,
     _partial_review_handler,
     base_reviewer_instructions,
     make_base_reviewer,
@@ -103,13 +104,27 @@ class StubRunner:
 
 
 class HandlerAwareStubRunner(StubRunner):
-    """Mimics the real SDK path: routes the ceiling through error_handlers."""
+    """Mimics the real SDK path: routes the failure through error_handlers."""
+
+    def __init__(
+        self,
+        final_output: Any = None,
+        delay: float = 0.0,
+        exc: BaseException | None = None,
+        kind: str = "max_turns",
+    ) -> None:
+        super().__init__(final_output=final_output, delay=delay, exc=exc)
+        self.kind = kind
 
     async def run(self, agent: Any, input: Any, **kwargs: Any) -> StubRunResult:
         self.calls.append({"agent": agent, "input": input, "kwargs": kwargs})
-        handler = kwargs["error_handlers"]["max_turns"]
+        errors = {
+            "max_turns": MaxTurnsExceeded("Max turns (4) exceeded"),
+            "invalid_final_output": ModelBehaviorError("Invalid JSON in final answer"),
+        }
+        handler = kwargs["error_handlers"][self.kind]
         handler_input = SimpleNamespace(
-            error=MaxTurnsExceeded("Max turns (4) exceeded"),
+            error=errors[self.kind],
             context=None,
             run_data=None,
         )
@@ -347,6 +362,7 @@ class TestRunReviewer:
         assert call["kwargs"]["context"] is ctx
         assert call["kwargs"]["max_turns"] == REVIEWER_MAX_TURNS == 4
         assert "max_turns" in call["kwargs"]["error_handlers"]
+        assert "invalid_final_output" in call["kwargs"]["error_handlers"]
 
     async def test_custom_max_turns_is_forwarded(self) -> None:
         stub = StubRunner(final_output=[])
@@ -373,6 +389,32 @@ class TestRunReviewer:
         assert outcome.findings == []
         assert "turn ceiling" in (outcome.partial_reason or "")
 
+    async def test_model_behavior_error_never_escapes_as_a_raise(self) -> None:
+        # Belt and braces: a runner without invalid_final_output handler
+        # support raises straight through run_reviewer, which must degrade it.
+        stub = StubRunner(exc=ModelBehaviorError("Invalid JSON in model output"))
+        outcome = await run_reviewer(make_base_reviewer(), "diff", make_ctx(), runner=stub)
+        assert outcome.partial is True
+        assert outcome.findings == []
+        assert outcome.reviewer_name == "BaseReviewer"
+        assert "produced an unparseable final answer" in (outcome.partial_reason or "")
+        assert "reported as a partial review" in (outcome.partial_reason or "")
+        assert outcome.latency_ms is not None
+
+    async def test_invalid_final_output_handler_path_marks_the_outcome_partial(
+        self,
+    ) -> None:
+        # A runner that honours error_handlers like the real SDK does: the
+        # malformed structured answer is routed through the registered
+        # invalid_final_output handler and the run COMPLETES with the
+        # handler's empty final_output — run_reviewer flags it partial.
+        stub = HandlerAwareStubRunner(kind="invalid_final_output")
+        outcome = await run_reviewer(make_base_reviewer(), "diff", make_ctx(), runner=stub)
+        assert outcome.partial is True
+        assert outcome.findings == []
+        assert "produced an unparseable final answer" in (outcome.partial_reason or "")
+        assert outcome.usage_summary is not None  # the run itself completed
+
     def test_partial_review_handler_returns_empty_final_output(self) -> None:
         handler_input = RunErrorHandlerInput(
             error=MaxTurnsExceeded("Max turns (4) exceeded"),
@@ -380,6 +422,16 @@ class TestRunReviewer:
             run_data=None,
         )
         result = _partial_review_handler(handler_input)
+        assert result.final_output == []
+        assert isinstance(result.include_in_history, bool)
+
+    def test_invalid_output_handler_returns_empty_final_output(self) -> None:
+        handler_input = RunErrorHandlerInput(
+            error=ModelBehaviorError("Invalid JSON in model output"),
+            context=RunContextWrapper(context=make_ctx()),
+            run_data=None,
+        )
+        result = _invalid_output_handler(handler_input)
         assert result.final_output == []
         assert isinstance(result.include_in_history, bool)
 

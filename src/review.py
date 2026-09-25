@@ -30,6 +30,7 @@ from typing import Any, Literal
 from agents import (
     Agent,
     MaxTurnsExceeded,
+    ModelBehaviorError,
     ModelSettings,
     Runner,
     RunConfig,
@@ -302,6 +303,27 @@ def _ceiling_reason(reviewer_name: str, max_turns: int) -> str:
     )
 
 
+def _invalid_output_handler(
+    handler_input: RunErrorHandlerInput[ReviewContext],
+) -> RunErrorHandlerResult:
+    """SDK ``error_handlers["invalid_final_output"]`` target.
+
+    Converts a ``ModelBehaviorError`` (the model emitted malformed structured
+    output for ``output_type=list[Finding]``) into an empty structured final
+    output so the run COMPLETES as a partial review instead of raising.
+    ``run_reviewer`` watches for this handler having fired and flags the
+    outcome ``partial=True``.
+    """
+    return RunErrorHandlerResult(final_output=[], include_in_history=True)
+
+
+def _unparseable_reason(reviewer_name: str) -> str:
+    return (
+        f"Reviewer '{reviewer_name}' produced an unparseable final answer; "
+        "reported as a partial review."
+    )
+
+
 def _coerce_findings(raw: Any) -> list[Finding]:
     """Normalise a run's final output into ``list[Finding]``.
 
@@ -351,18 +373,21 @@ async def run_reviewer(
 
     - passes the ``ReviewContext`` through ``context=`` (FR-2) — the diff
       itself is the run input, the context never enters prompt text;
-    - registers ``error_handlers={"max_turns": ...}`` (FR-9) so an exceeded
-      ceiling becomes a partial review; a belt-and-braces ``except
-      MaxTurnsExceeded`` backs that up for runners that ignore the handlers;
+    - registers ``error_handlers={"max_turns": ..., "invalid_final_output": ...}``
+      (FR-9) so an exceeded ceiling AND a malformed structured answer each
+      become a partial review; belt-and-braces ``except MaxTurnsExceeded`` /
+      ``except ModelBehaviorError`` back that up for runners that ignore the
+      handlers;
     - records per-reviewer latency (``perf_counter``) on the outcome.
 
-    Model/SDK errors other than the ceiling propagate to the caller (Task 5
-    wraps them); an unusable final output is converted into a partial outcome
-    with a sentence, because a missing reviewer outcome would break the fan-out
-    group.
+    Model/SDK errors other than the ceiling and the malformed final answer
+    propagate to the caller (Task 5 wraps them); an unusable final output is
+    converted into a partial outcome with a sentence, because a missing
+    reviewer outcome would break the fan-out group.
     """
     started = time.perf_counter()
     hit_ceiling = False
+    hit_invalid_output = False
 
     def _on_max_turns(
         handler_input: RunErrorHandlerInput[ReviewContext],
@@ -371,13 +396,23 @@ async def run_reviewer(
         hit_ceiling = True
         return _partial_review_handler(handler_input)
 
+    def _on_invalid_final_output(
+        handler_input: RunErrorHandlerInput[ReviewContext],
+    ) -> RunErrorHandlerResult:
+        nonlocal hit_invalid_output
+        hit_invalid_output = True
+        return _invalid_output_handler(handler_input)
+
     try:
         result = await runner.run(
             agent,
             diff,
             context=ctx,
             max_turns=max_turns,
-            error_handlers={"max_turns": _on_max_turns},
+            error_handlers={
+                "max_turns": _on_max_turns,
+                "invalid_final_output": _on_invalid_final_output,
+            },
             run_config=run_config,
         )
     except MaxTurnsExceeded:
@@ -388,6 +423,16 @@ async def run_reviewer(
             findings=[],
             partial=True,
             partial_reason=_ceiling_reason(agent.name, max_turns),
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+        )
+    except ModelBehaviorError:
+        # Belt and braces: a runner without invalid_final_output handler
+        # support must still not leak a malformed structured answer.
+        return ReviewerOutcome(
+            reviewer_name=agent.name,
+            findings=[],
+            partial=True,
+            partial_reason=_unparseable_reason(agent.name),
             latency_ms=(time.perf_counter() - started) * 1000.0,
         )
 
@@ -404,6 +449,19 @@ async def run_reviewer(
             findings=findings,
             partial=True,
             partial_reason=_ceiling_reason(agent.name, max_turns),
+            usage_summary=usage_summary,
+            latency_ms=latency_ms,
+        )
+
+    if hit_invalid_output:
+        # The invalid_final_output handler resolved the malformed structured
+        # answer into an empty list, so the run COMPLETED; salvage nothing and
+        # report the partial.
+        return ReviewerOutcome(
+            reviewer_name=agent.name,
+            findings=[],
+            partial=True,
+            partial_reason=_unparseable_reason(agent.name),
             usage_summary=usage_summary,
             latency_ms=latency_ms,
         )
