@@ -80,7 +80,9 @@ the bottom), including the browser-tested UI pass.
 ```
 Setup:    python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 Test:     .venv/Scripts/python -m pytest -q
-UI:       .venv/Scripts/chainlit run app.py --port 8000
+UI:       .venv/Scripts/python run_ui.py --port 8000
+          (on Python 3.14 use run_ui.py — chainlit 2.11's nest_asyncio breaks
+          static-asset serving there; `chainlit run app.py` still starts chat)
 CLI demo: .venv/Scripts/python cli.py --diff examples/three_file_issue.diff --repo demo --language python --ruleset defaultCLI strict + cheaper re-run (FR-7):
           .venv/Scripts/python cli.py --diff examples/three_file_issue.diff --repo demo --language python --ruleset default --strict --model-override gemini-3.5-flash-lite
 ```

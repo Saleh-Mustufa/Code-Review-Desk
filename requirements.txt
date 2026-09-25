@@ -1,4 +1,4 @@
-openai-agents>=0.4
+openai-agents~=0.22.3
 chainlit>=2.0
 python-dotenv>=1.0
 pydantic>=2.7

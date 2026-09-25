@@ -345,9 +345,9 @@ def _parse_merged_output(output: Any) -> list[MergedFinding] | None:
 def _merged_from_tool_output(result: Any) -> list[MergedFinding] | None:
     """Extract the merged list from the Desk run's merge tool output, if any.
 
-    The deterministic :func:`dedupe_and_order` result is the source of truth;
-    the Desk's merge tool output is preferred when it parses cleanly (non-empty),
-    because that is the agentic path exercised in the trace.
+    The Desk's merge tool output - the agentic path, visible in the trace - is
+    preferred whenever it parses cleanly and is non-empty; the deterministic
+    :func:`dedupe_and_order` result is the fallback when it does not.
     """
     for item in getattr(result, "new_items", None) or []:
         if type(item).__name__ != "ToolCallOutputItem":
@@ -657,9 +657,9 @@ async def run_review(
                 yield ReviewComplete(report=report)
                 return
 
-            # Deterministic merge is the source of truth; the Desk's merge tool
-            # output (the agentic path, visible in the trace) is used when it
-            # parses cleanly and is non-empty.
+            # Prefer the Desk's merge tool output (the agentic path, visible in
+            # the trace); the deterministic dedupe_and_order result is the
+            # fallback when the tool output does not parse or is empty.
             merged = dedupe_and_order(tagged)
             if desk_result is not None:
                 tool_merged = _merged_from_tool_output(desk_result)
