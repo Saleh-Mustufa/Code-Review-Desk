@@ -1,0 +1,58 @@
+diff --git a/app/reminder.py b/app/reminder.py
+index 4f2a1c2..9d3e7f1 100644
+--- a/app/reminder.py
++++ b/app/reminder.py
+@@ -1,14 +1,19 @@
++import datetime as dt
++
++
+ class Reminder:
+     def __init__(self, title, due):
+         self.title = title
+         self.due = due
++
++    def is_overdue(self, now=None):
++        now = now or dt.datetime.now()
++        return self.due < now
+
+-    def notify(self, user):
+-        print("Sending notification to " + user)
+
++    def notify(self, user):
++        print(f"Sending notification to {user}")
++        self.last_notified = dt.datetime.now()
+diff --git a/app/billing.py b/app/billing.py
+index 8b7c9d0..2e4f5a6 100644
+--- a/app/billing.py
++++ b/app/billing.py
+@@ -1,9 +1,13 @@
+ def compute_invoice(items, tax_rate):
+-    total = sum(items)
+-    return total
++    if not items:
++        raise ValueError("invoice requires at least one item")
++    subtotal = sum(items)
++    return subtotal * (1 + tax_rate)
++
++
++def apply_discount(total, percent):
++    return total - total * percent / 100
+diff --git a/app/storage.py b/app/storage.py
+index 1a2b3c4..5d6e7f8 100644
+--- a/app/storage.py
++++ b/app/storage.py
+@@ -1,8 +1,12 @@
+ import json
+
++
+ def save_reminders(path, reminders):
+-    f = open(path, "w")
+-    f.write(json.dumps(reminders))
+-    f.close()
++    with open(path, "w") as f:
++        f.write(json.dumps(reminders, default=str))
++
++
++def load_reminders(path):
++    with open(path) as f:
++        return json.load(f)

@@ -115,11 +115,11 @@ async def main() -> int:
     )
     say(f"ledger lines before: {ledger_before}")
 
-    issue_diff = await read_diff(ROOT / "examples" / "three_file_issue.diff")
+    clean_diff = await read_diff(ROOT / "examples" / "three_file_clean.diff")
     ctx = ReviewContext(repo="demo-repo", language="python", ruleset_id="default")
 
     concurrent_start = time.perf_counter()
-    report, _events = await drive(issue_diff, ctx)
+    report, _events = await drive(clean_diff, ctx)
     concurrent_s = time.perf_counter() - concurrent_start
     if report is None:
         say("FAIL: no report")
@@ -149,7 +149,7 @@ async def main() -> int:
     # ---- 2. Sequential wall clock ----
     section("2. FR-5 — sequential wall clock (same diff, one reviewer at a time)")
     seq_start = time.perf_counter()
-    seq_report, _ = await drive(issue_diff, ctx)
+    seq_report, _ = await drive(clean_diff, ctx)
     sequential_s = time.perf_counter() - seq_start
     say()
     say(f"CONCURRENT wall clock: {concurrent_s:.2f}s")
@@ -158,7 +158,7 @@ async def main() -> int:
 
     # ---- 4. FR-8: planted secret -> refusal ----
     section("4. FR-8 — planted secret in the diff -> output guardrail refusal")
-    secret_diff = issue_diff  # three_file_issue.diff plants a fake key
+    secret_diff = await read_diff(ROOT / "examples" / "three_file_issue.diff")  # plants a fake key
     ref_report, ref_events = await drive(secret_diff, ctx)
     refused = any(isinstance(e, GuardrailRefused) for e in ref_events)
     say(f"refusal observed: {refused}")
@@ -175,7 +175,7 @@ async def main() -> int:
     section("7. FR-7 — same reviewer objects, run-level model override")
     say(f"chain head (priority model): {PRIORITY_MODEL}")
     override = "gemini-3.5-flash-lite"
-    report_o, _ = await drive(issue_diff, ctx, model_override=override)
+    report_o, _ = await drive(clean_diff, ctx, model_override=override)
     if report_o is None:
         say("FAIL: no report for override run")
         return 1
