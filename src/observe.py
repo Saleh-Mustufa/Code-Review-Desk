@@ -231,13 +231,17 @@ def append_ledger_line(
     findings: int,
     model: str | None = None,
     tokens: int | None = None,
+    status: str = "ok",
+    error: str | None = None,
 ) -> None:
     """Append ONE JSON line to the ledger file (the FR-11 line format).
 
     Module-level so it is unit-testable without a real run. Keys: ``ts``,
-    ``request_id``, ``agent``, ``ms``, ``findings``, plus ``model`` and
-    ``tokens`` when known. Never receives — and never writes — diff text,
-    tool output or secret material.
+    ``request_id``, ``agent``, ``ms``, ``findings``, ``status`` (``"ok"`` by
+    default; ``"error"`` marks a failed run), plus ``model`` and ``tokens``
+    when known and ``error`` — the exception TYPE name only, never its
+    message, which could echo request content. Never receives — and never
+    writes — diff text, tool output or secret material.
     """
     line: dict[str, Any] = {
         "ts": ts,
@@ -250,6 +254,9 @@ def append_ledger_line(
         line["model"] = model
     if tokens is not None:
         line["tokens"] = tokens
+    line["status"] = status
+    if error:
+        line["error"] = error
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(line, ensure_ascii=False) + "\n")
 
@@ -300,7 +307,7 @@ def _total_tokens(result: Any) -> int | None:
 
 
 class LedgerRunner(Runner):
-    """A ``Runner`` that appends exactly one JSON line per run (FR-11).
+    """A ``Runner`` that appends exactly one JSON line per run (FR-11, NFR-3).
 
     ``Runner`` itself exposes ``run`` as a *classmethod* delegating to the SDK's
     default agent runner; this subclass adds an instance ``run`` (so the
@@ -308,12 +315,17 @@ class LedgerRunner(Runner):
 
     1. injects the task's :data:`current_run_hooks` when the caller passed none,
     2. awaits the standard run via ``super().run(...)``,
-    3. appends one ledger line (ts, request_id from the run config's
-       ``group_id``, final agent name, wall-clock ms, findings count, model
-       name, total tokens).
+    3. appends ONE ledger line per run — INCLUDING failed runs (NFR-3), with a
+       ``status`` field distinguishing them. A ``"ok"`` line carries the final
+       agent name, wall-clock ms, findings count, model name and total tokens;
+       an ``"error"`` line carries the STARTING agent's name (the result never
+       arrived), zero findings, no tokens, and the exception's TYPE name only —
+       never its message, which could echo request content — before the
+       original exception re-raises unchanged: the ledger never changes run
+       semantics.
 
-    The record step is best-effort: a ledger failure is logged, never raised
-    into the review.
+    The record step is best-effort on both paths: a ledger failure is logged,
+    never raised into the review, and never masks the run's own exception.
     """
 
     def __init__(self, ledger_path: str | Path | None = None) -> None:
@@ -333,7 +345,33 @@ class LedgerRunner(Runner):
         request_id = _run_config_value(kwargs, "group_id") or ""
         model_name = _model_name_for_ledger(kwargs, starting_agent)
         started = time.perf_counter()
-        result = await super().run(starting_agent, input, **kwargs)
+        try:
+            result = await super().run(starting_agent, input, **kwargs)
+        except Exception as exc:
+            # NFR-3: a failed run still lands its line, status "error". The
+            # record carries the exception TYPE name only — the message could
+            # echo request content — and the append is best-effort, so the
+            # original exception re-raises unchanged (the pipeline depends on
+            # catching the tripwire; the ledger never changes run semantics).
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            try:
+                self._record(
+                    request_id=request_id,
+                    agent=getattr(starting_agent, "name", "unknown"),
+                    ms=elapsed_ms,
+                    findings=0,
+                    model=model_name,
+                    tokens=None,
+                    status="error",
+                    error=type(exc).__name__,
+                )
+            except Exception as record_exc:  # noqa: BLE001 - never mask the run's error
+                _LOGGER.warning(
+                    "ledger append failed (%s: %s)",
+                    type(record_exc).__name__,
+                    record_exc,
+                )
+            raise
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         try:
             self._record(
@@ -357,6 +395,8 @@ class LedgerRunner(Runner):
         findings: int,
         model: str | None,
         tokens: int | None,
+        status: str = "ok",
+        error: str | None = None,
     ) -> None:
         append_ledger_line(
             self.ledger_path,
@@ -367,6 +407,8 @@ class LedgerRunner(Runner):
             findings=findings,
             model=model,
             tokens=tokens,
+            status=status,
+            error=error,
         )
 
 

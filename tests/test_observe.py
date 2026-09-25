@@ -69,6 +69,10 @@ class FakeAgentRunner:
         return self.result
 
 
+class FakeTripwireTriggered(Exception):
+    """OutputGuardrailTripwireTriggered-like: its message stands in for request content."""
+
+
 @pytest.fixture
 def ctx() -> ReviewContext:
     return ReviewContext(repo="demo", language="python", ruleset_id="default")
@@ -105,6 +109,7 @@ def test_append_ledger_line_writes_one_json_line(tmp_path) -> None:
         "findings": 3,
         "model": "gemini-2.5-flash",
         "tokens": 750,
+        "status": "ok",
     }
 
 
@@ -182,6 +187,7 @@ async def test_ledger_runner_appends_one_line_per_run(monkeypatch, tmp_path) -> 
     assert line["findings"] == 3  # list output -> item count
     assert line["model"] == "gemini-test-model"  # introspected, not hardcoded
     assert line["tokens"] == 750  # REAL total from the run context usage
+    assert line["status"] == "ok"  # happy-path marker distinguishes failed runs
     assert isinstance(line["ms"], int) and line["ms"] >= 0
     assert line["ts"].endswith("Z")
     # The ledger never sees the run input (the diff) or any output content.
@@ -212,6 +218,94 @@ async def test_ledger_runner_failure_never_breaks_the_run(monkeypatch, tmp_path)
     ledger = LedgerRunner(ledger_path=tmp_path / "ledger.jsonl")
     out = await ledger.run(FakeAgent("StyleReviewer"), "x", run_config=None)
     assert out is result  # a ledger failure is logged, never raised
+
+
+class FailingAgentRunner:
+    """Stands in for a run whose underlying run raises (no model traffic)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls = 0
+
+    async def run(self, starting_agent: object, input: object, **kwargs: object) -> object:
+        self.calls += 1
+        raise self.exc
+
+
+@pytest.mark.asyncio
+async def test_ledger_runner_records_failed_run_and_reraises(monkeypatch, tmp_path) -> None:
+    """NFR-3: a tripped guardrail still lands exactly one line — then re-raises."""
+    failing = FailingAgentRunner(
+        FakeTripwireTriggered("guardrail refused diff content: sk-credential-shaped-text")
+    )
+    monkeypatch.setattr(agents.run, "DEFAULT_AGENT_RUNNER", failing)
+    ledger = LedgerRunner(ledger_path=tmp_path / "ledger.jsonl")
+    run_config = RunConfig(
+        workflow_name="Code Review Desk",
+        group_id="rev_err001",
+        model=SimpleNamespace(model="gemini-test-model"),
+    )
+    with pytest.raises(FakeTripwireTriggered):  # the ledger never changes run semantics
+        await ledger.run(
+            FakeAgent("SecurityReviewer"), "the diff text", context=None, run_config=run_config
+        )
+
+    assert failing.calls == 1
+    lines = (tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1  # exactly ONE line even for the failed run
+    line = json.loads(lines[0])
+    assert line["status"] == "error"
+    assert line["error"] == "FakeTripwireTriggered"  # the exception TYPE name
+    assert line["agent"] == "SecurityReviewer"  # the STARTING agent (no result arrived)
+    assert line["findings"] == 0
+    assert "tokens" not in line
+    assert line["model"] == "gemini-test-model"
+    assert line["request_id"] == "rev_err001"
+    assert isinstance(line["ms"], int) and line["ms"] >= 0
+    assert line["ts"].endswith("Z")
+    # Neither the exception message (which echoes request content) nor the run
+    # input may ever land in the ledger line.
+    assert "guardrail refused" not in lines[0]
+    assert "sk-credential-shaped-text" not in lines[0]
+    assert "the diff text" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_ledger_runner_error_line_never_carries_the_exception_message(
+    monkeypatch, tmp_path
+) -> None:
+    """No exception message text lands in the line, whatever the error type."""
+    monkeypatch.setattr(
+        agents.run,
+        "DEFAULT_AGENT_RUNNER",
+        FailingAgentRunner(RuntimeError("model blew up quoting request-body-9f8e7d")),
+    )
+    ledger = LedgerRunner(ledger_path=tmp_path / "ledger.jsonl")
+    with pytest.raises(RuntimeError):
+        await ledger.run(FakeAgent("TestsReviewer"), "x", run_config=None)
+    lines = (tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    line = json.loads(lines[0])
+    assert line["status"] == "error"
+    assert line["error"] == "RuntimeError"  # type name only
+    assert line["agent"] == "TestsReviewer" and line["findings"] == 0
+    assert "request-body-9f8e7d" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_ledger_runner_append_failure_never_masks_the_run_error(
+    monkeypatch, tmp_path
+) -> None:
+    failing = FailingAgentRunner(FakeTripwireTriggered("tripwire"))
+    monkeypatch.setattr(agents.run, "DEFAULT_AGENT_RUNNER", failing)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(observe, "append_ledger_line", boom)
+    ledger = LedgerRunner(ledger_path=tmp_path / "ledger.jsonl")
+    with pytest.raises(FakeTripwireTriggered):  # the run's error wins, never the ledger's
+        await ledger.run(FakeAgent("SecurityReviewer"), "x", run_config=None)
 
 
 @pytest.mark.asyncio
