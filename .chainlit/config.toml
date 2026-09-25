@@ -96,7 +96,7 @@ reaction_on_message_received = false
 
 [UI]
 # Name of the assistant.
-name = "Code Review Desk"
+name = "ReviewDesk"
 
 # default_theme = "dark"
 

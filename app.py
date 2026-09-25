@@ -65,9 +65,9 @@ DEFAULT_STRICTNESS = "normal"
 # --- Severity badges (Task 6 styling contract) ---
 
 SEVERITY_BADGES: dict[str, str] = {
-    "critical": "🔴 CRITICAL",
-    "major": "🟠 MAJOR",
-    "minor": "🟡 MINOR",
+    "critical": "CRITICAL",
+    "major": "MAJOR",
+    "minor": "MINOR",
 }
 
 # --- Session-state keys (FR-12) ---
@@ -82,7 +82,7 @@ SESSION_LOCK = "review_lock"
 
 
 def severity_badge(severity: str) -> str:
-    """The emoji badge for one severity; unknown severities degrade gracefully."""
+    """The uppercase severity label; unknown severities degrade gracefully."""
     return SEVERITY_BADGES.get(severity, severity.upper())
 
 
@@ -104,14 +104,14 @@ def format_findings_card(
 ) -> str:
     """One severity-styled markdown card for a reviewer's landed findings.
 
-    Emoji badges carry the severity colours (🔴/🟠/🟡); the CSS theme in
+    Severity labels are plain uppercase text; the CSS theme in
     ``public/styles.css`` styles the surrounding message card generically.
     A partial review is flagged in the header and its reason footnoted.
     """
     counts = severity_counts(findings)
     state = "partial review" if partial else "findings"
     header = (
-        f"**🧐 {reviewer} — {state}: {len(findings)} finding(s) "
+        f"**{reviewer} — {state}: {len(findings)} finding(s) "
         f"({counts['critical']} critical / {counts['major']} major / "
         f"{counts['minor']} minor)"
     )
@@ -129,7 +129,7 @@ def format_findings_card(
         )
     if partial and partial_reason:
         lines.append("")
-        lines.append(f"> ⚠️ Partial: {partial_reason}")
+        lines.append(f"> Partial: {partial_reason}")
     return "\n".join(lines)
 
 
@@ -137,14 +137,14 @@ def format_merged_card(findings: list[Finding]) -> str:
     """The deduplicated, severity-ordered merged findings as one card."""
     counts = severity_counts(findings)
     lines = [
-        f"## 🧾 Merged findings — {len(findings)} unique",
+        f"## Merged findings — {len(findings)} unique",
         "",
         f"_{counts['critical']} critical · {counts['major']} major · "
         f"{counts['minor']} minor_",
         "",
     ]
     if not findings:
-        lines.append("No findings — the diff looks clean to the desk. 🎉")
+        lines.append("No findings — the diff looks clean to the desk.")
     for finding in findings:
         sources = getattr(finding, "sources", None)
         suffix = f" *(sources: {', '.join(sources)})*" if sources else ""
@@ -164,7 +164,7 @@ def format_refusal_message(reason: str, masked: str | None) -> str:
     enter the chat from here.
     """
     lines = [
-        "🚫 **The report was refused by the secret guardrail.**",
+        "**The report was refused by the secret guardrail.**",
         "",
         reason,
     ]
@@ -181,7 +181,7 @@ def format_refusal_message(reason: str, masked: str | None) -> str:
 
 def format_footer_message(report: ReviewReport) -> str:
     """The FR-10 measurements footer as a chat message body."""
-    return f"## ⏱ Measurements\n\n{report.footer}"
+    return f"## Measurements\n\n{report.footer}"
 
 
 def format_status(event: object, state: dict | None = None) -> str | None:
@@ -232,6 +232,37 @@ def format_status(event: object, state: dict | None = None) -> str | None:
     if isinstance(event, ReviewComplete):
         return "Review complete — measurements below."
     return None
+
+
+def format_agent_board(state: dict) -> str | None:
+    """The live agent board: one line per reviewer, updated in place.
+
+    This is the "watch the agents work" surface: each reviewer's line moves
+    from *running* to its landed state (findings, latency) or *partial*.
+    Returns ``None`` until the first reviewer is launched, so the board
+    message is only created when there is something to show.
+    """
+    agents = state.get("agents") or {}
+    if not agents:
+        return None
+    lines = ["**Agents**", ""]
+    for name, line in agents.items():
+        lines.append(f"- **{name}** — {line}")
+    return "\n".join(lines)
+
+
+def _agent_line(event: object) -> str:
+    """The board line for a landed reviewer (kept in sync with its card)."""
+    counts = severity_counts(event.findings)
+    landed_state = "partial" if getattr(event, "partial", False) else "done"
+    base = (
+        f"{landed_state}: {len(event.findings)} finding(s) "
+        f"({counts['critical']} critical)"
+    )
+    latency = getattr(event, "latency_ms", None)
+    if latency is not None:
+        base += f" · {latency:.0f} ms"
+    return base
 
 
 # --- Session-state helpers (FR-12) ---
@@ -306,21 +337,16 @@ def parse_desk_directive(text: str) -> tuple[str, dict[str, str]]:
 
 # --- Welcome text ---
 
-WELCOME = """Welcome to the **Code Review Desk** 🪑
+WELCOME = """**ReviewDesk** — paste a diff, get a structured review.
 
-Paste a **unified diff** into the chat and I'll review it with three
-concurrent reviewers (security, tests, code quality), stream each reviewer's
-findings as it lands, then merge them, and finish with a measurements footer
-(latency + tokens per reviewer). Run `git diff` and paste the whole output,
-starting with the `diff --git` lines.
+Three agents review your change in parallel: **security**, **tests** and **style**. Their findings stream in as each agent finishes, then get merged and severity-ordered, with per-agent latency and token usage at the end.
 
-**Settings** — the first diff of a session is reviewed as repo
-`pasted-diff`, language `python`, ruleset `default`, strictness `normal`.
-A second diff pasted in the same session **reuses those settings** (session
-state), so you can iterate on the same change without repeating yourself.
+**How to use**
 
-To change the settings, prefix the FIRST line of your message with a
-directive, then put the diff below it:
+1. Run `git diff` and paste the whole output (it starts with a `diff --git` line).
+2. Watch each agent report, then read the merged report.
+
+Settings from your first diff (repo, language, ruleset, strictness) are reused for the session. To change them, put a directive on the first line:
 
 ```
 desk: repo=my-repo lang=python ruleset=default strict=strict
@@ -328,9 +354,7 @@ diff --git a/app.py b/app.py
 ...
 ```
 
-Every failure is one friendly sentence — a malformed diff never crashes the
-desk, and if a credential shape appears in the output, the secret guardrail
-refuses the report instead of echoing it. 🛡️"""
+A diff containing a credential is refused rather than echoed."""
 
 
 # --- Chainlit handlers ---
@@ -463,6 +487,24 @@ async def _handle_event(event: object, status: cl.Message, state: dict) -> None:
         status.content = status_text
         await status.update()
 
+    # Live agent board: update the agent's line FIRST, then render, so the
+    # board shows this event's effect immediately (never one event behind).
+    if isinstance(event, ReviewerStarted):
+        state.setdefault("agents", {})[event.reviewer] = "running"
+    elif isinstance(event, FindingsLanded):
+        state.setdefault("agents", {})[event.reviewer] = _agent_line(event)
+
+    board_text = format_agent_board(state)
+    if board_text is not None:
+        board: cl.Message | None = state.get("board")
+        if board is None:
+            board = cl.Message(content=board_text)
+            state["board"] = board
+            await board.send()
+        else:
+            board.content = board_text
+            await board.update()
+
     if isinstance(event, FindingsLanded):
         await cl.Message(
             content=format_findings_card(
@@ -481,7 +523,7 @@ async def _handle_event(event: object, status: cl.Message, state: dict) -> None:
     elif isinstance(event, RemediationOffered):
         if event.escalation is not None:
             await cl.Message(
-                content=f"## 🛠 Remediation proposal\n\n{event.text}"
+                content=f"## Remediation proposal\n\n{event.text}"
             ).send()
     elif isinstance(event, GuardrailRefused):
         await cl.Message(

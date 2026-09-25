@@ -7,7 +7,7 @@
  * bundle: `.message-content`, plus generic element surfaces) and degrades to
  * no-ops if a class is renamed — every rule is additive styling, never layout
  * that could hide content. Markdown (not raw HTML) carries the severity
- * badges (🔴 CRITICAL / 🟠 MAJOR / 🟡 MINOR), so the theme stays safe with
+ * labels (CRITICAL / MAJOR / MINOR), so the theme stays safe with
  * `unsafe_allow_html = false`.
  */
 
@@ -27,11 +27,15 @@ body {
   );
 }
 
-/* Rounded, softly-shadowed message cards. */
+/* Rounded, softly-shadowed message cards — with real padding so text never
+ * touches the card border (the v1 "text colliding with the box" defect). */
 .message-content {
   border-radius: var(--desk-radius);
   box-shadow: 0 1px 3px rgba(15, 15, 35, 0.12);
   border: 1px solid rgba(109, 93, 252, 0.14);
+  padding: 0.85rem 1.1rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 /* Monospace for inline code and fenced blocks (diffs, patches). */

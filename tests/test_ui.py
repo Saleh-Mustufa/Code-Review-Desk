@@ -189,9 +189,9 @@ def make_report(
 
 
 def test_severity_badge_mapping():
-    assert app_module.severity_badge("critical") == "🔴 CRITICAL"
-    assert app_module.severity_badge("major") == "🟠 MAJOR"
-    assert app_module.severity_badge("minor") == "🟡 MINOR"
+    assert app_module.severity_badge("critical") == "CRITICAL"
+    assert app_module.severity_badge("major") == "MAJOR"
+    assert app_module.severity_badge("minor") == "MINOR"
     # Unknown severities degrade to the raw label, never crash.
     assert app_module.severity_badge("blocker") == "BLOCKER"
 
@@ -206,9 +206,11 @@ def test_findings_card_counts_and_badges():
     assert "SecurityReviewer" in card
     assert "3 finding(s)" in card
     assert "1 critical" in card and "1 major" in card and "1 minor" in card
-    assert "🔴 CRITICAL" in card
-    assert "🟠 MAJOR" in card
-    assert "🟡 MINOR" in card
+    assert "CRITICAL" in card
+    assert "MAJOR" in card
+    assert "MINOR" in card
+    # The UI is emoji-free by design.
+    assert not any(ch in card for ch in ("🔴", "🟠", "🟡"))
     assert "`app.py:1`" in card and "Watch out." in card
     assert "partial" not in card.lower()
 
@@ -259,7 +261,7 @@ def test_merged_card_deduped_count_sources_and_order():
     card = app_module.format_merged_card(merged)
     assert "3 unique" in card
     assert "2 critical · 0 major · 1 minor" in card
-    assert card.index("🔴 CRITICAL") < card.index("🟡 MINOR")
+    assert card.index("CRITICAL") < card.index("MINOR")
     assert "sources: SecurityReviewer, QualityReviewer" in card
     assert "Style nit." in card
 
@@ -805,9 +807,9 @@ async def test_on_chat_start_seeds_state_and_sends_welcome(monkeypatch, capsys):
     # Exactly one welcome message, explaining the desk and the diff paste.
     assert len(FakeMessage.sent) == 1
     welcome = FakeMessage.sent[0].content
-    assert "Code Review Desk" in welcome
-    assert "unified diff" in welcome
-    assert "reuses those settings" in welcome
+    assert "ReviewDesk" in welcome
+    assert "unified diff" in welcome or "git diff" in welcome
+    assert "reused" in welcome
 
 
 @pytest.mark.asyncio
@@ -846,3 +848,75 @@ async def test_partial_review_reaches_status_and_card(monkeypatch):
     status_history = "\n".join(FakeMessage.sent[0].history)
     assert "PARTIAL" in status_history
     assert "Partial review" in status_history
+
+
+# --- Live agent board (watch the agents work) -----------------------------------
+
+
+def test_agent_board_empty_state_returns_none():
+    assert app_module.format_agent_board({}) is None
+    assert app_module.format_agent_board({"agents": {}}) is None
+
+
+def test_agent_board_lists_each_agent_line():
+    state = {
+        "agents": {
+            "SecurityReviewer": "running",
+            "TestsReviewer": "done: 3 finding(s) (1 critical) · 4500 ms",
+        }
+    }
+    board = app_module.format_agent_board(state)
+    assert board is not None
+    assert board.startswith("**Agents**")
+    assert "- **SecurityReviewer** — running" in board
+    assert "- **TestsReviewer** — done: 3 finding(s) (1 critical) · 4500 ms" in board
+
+
+def test_agent_line_reports_findings_latency_and_partial():
+    event = FindingsLanded(
+        reviewer="StyleReviewer",
+        findings=[make_finding("minor")],
+        partial=False,
+        partial_reason=None,
+        latency_ms=1200.0,
+    )
+    line = app_module._agent_line(event)
+    assert line.startswith("done: 1 finding(s)")
+    assert "1200 ms" in line
+    partial = FindingsLanded(
+        reviewer="StyleReviewer",
+        findings=[],
+        partial=True,
+        partial_reason="ceiling",
+        latency_ms=900.0,
+    )
+    assert app_module._agent_line(partial).startswith("partial: 0 finding(s)")
+
+
+async def test_handle_event_creates_and_updates_the_board(monkeypatch):
+    install_fake_cl(monkeypatch)
+    status = FakeMessage(content="Starting review…")
+    state: dict = {"reviewers_started": 0}
+
+    started = ReviewerStarted(reviewer="SecurityReviewer")
+    await app_module._handle_event(started, status, state)
+    # The board was created on the first launch and shows the agent running.
+    boards = [m for m in FakeMessage.sent if m.content.startswith("**Agents**")]
+    assert len(boards) == 1
+    assert "running" in boards[0].content
+    assert state["agents"]["SecurityReviewer"] == "running"
+
+    landed = FindingsLanded(
+        reviewer="SecurityReviewer",
+        findings=[make_finding("critical")],
+        partial=False,
+        partial_reason=None,
+        latency_ms=2100.0,
+    )
+    await app_module._handle_event(landed, status, state)
+    # The SAME board message was updated in place, not duplicated.
+    boards = [m for m in FakeMessage.sent if m.content.startswith("**Agents**")]
+    assert len(boards) == 1
+    assert boards[0].update_count == 1
+    assert "done: 1 finding(s) (1 critical)" in boards[0].content
+    assert "2100 ms" in boards[0].content
