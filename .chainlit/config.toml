@@ -98,6 +98,9 @@ reaction_on_message_received = false
 # Name of the assistant.
 name = "Code Review Desk"
 
+# Description of the assistant. This is used for HTML tags.
+description = "Professional code review for pasted diffs — three concurrent reviewers, one merged report, real measurements."
+
 # default_theme = "dark"
 
 # Force a specific language for all users (e.g., "en-US", "he-IL", "fr-FR")

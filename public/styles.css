@@ -1,68 +1,301 @@
-/* Code Review Desk — custom Chainlit theme additions (Task 6).
- *
- * Loaded via `[UI] custom_css = "/public/styles.css"` in .chainlit/config.toml;
- * chainlit serves this file at /public/styles.css and injects the <link> tag.
- *
- * Targets only stable chainlit classes (verified in the shipped frontend
- * bundle: `.message-content`, plus generic element surfaces) and degrades to
- * no-ops if a class is renamed — every rule is additive styling, never layout
- * that could hide content. Markdown (not raw HTML) carries the severity
- * badges (🔴 CRITICAL / 🟠 MAJOR / 🟡 MINOR), so the theme stays safe with
- * `unsafe_allow_html = false`.
- */
+/* ============================================================
+   Code Review Desk — design system (professional dark theme)
+   ============================================================
+   Loaded via `[UI] custom_css = "/public/styles.css"` in
+   .chainlit/config.toml; chainlit serves this file at
+   /public/styles.css and injects the <link> tag.
+
+   Selectors target only stable chainlit classes (verified in the
+   shipped frontend bundle: `.message-content`, plus generic
+   markdown-rendered elements) and degrade to no-ops if a class is
+   renamed — every rule is additive styling, never layout that could
+   hide content. Safe with `unsafe_allow_html = false`: the chat is
+   pure markdown, and THIS file carries the design system.
+
+   Pill/chip system — the markdown wrapper is the CSS hook:
+     **`🔴 CRITICAL`** → strong > code  → CRITICAL pill (red)
+     `🟠 MAJOR`        → code           → MAJOR pill (amber)
+     *`🔵 MINOR`*      → em > code      → MINOR pill (sky)
+     *`app.py:1`*      → em > code      → file:line chip (sky, shares
+                                          the quiet MINOR info hue)
+     `other code`      → code           → MAJOR amber chip
+   ============================================================ */
 
 :root {
-  --desk-major: #f5a623;
-  --desk-accent: #6d5dfc;
-  --desk-accent-soft: rgba(109, 93, 252, 0.12);
-  --desk-radius: 14px;
+  /* Surfaces */
+  --desk-bg: #0b0e14;
+  --desk-panel: #11151c;
+  --desk-panel-raised: #161b25;
+  --desk-border: rgba(255, 255, 255, 0.07);
+  --desk-border-strong: rgba(255, 255, 255, 0.12);
+
+  /* Accent: indigo → violet gradient */
+  --desk-accent: #6366f1;
+  --desk-accent-2: #8b5cf6;
+  --desk-accent-soft: rgba(99, 102, 241, 0.12);
+  --desk-gradient: linear-gradient(135deg, #6366f1, #8b5cf6);
+
+  /* Severity tokens (defined AND used below) */
+  --desk-critical: #ef4444;
+  --desk-major: #f59e0b;
+  --desk-minor: #38bdf8;
+
+  /* Text */
+  --desk-text: #e6e9ef;
+  --desk-text-muted: #9aa3b2;
+
+  /* Shape & type */
+  --desk-radius: 16px;
+  --desk-radius-sm: 8px;
+  --desk-font: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --desk-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas,
+    "SF Mono", monospace;
 }
 
-/* Chat background: a whisper of the desk accent behind the conversation. */
+/* ---------- App shell ---------- */
+
 body {
+  background-color: var(--desk-bg);
   background-image: radial-gradient(
-    1200px 600px at 15% -10%,
-    var(--desk-accent-soft),
-    transparent 60%
-  );
+      1100px 500px at 12% -8%,
+      var(--desk-accent-soft),
+      transparent 55%
+    ),
+    radial-gradient(900px 420px at 105% 8%, rgba(139, 92, 246, 0.07), transparent 60%);
+  font-family: var(--desk-font);
+  color: var(--desk-text);
 }
 
-/* Rounded, softly-shadowed message cards. */
+/* Custom scrollbar (WebKit + Firefox) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- Message cards ---------- */
+
 .message-content {
+  position: relative;
+  background: var(--desk-panel);
+  border: 1px solid var(--desk-border);
   border-radius: var(--desk-radius);
-  box-shadow: 0 1px 3px rgba(15, 15, 35, 0.12);
-  border: 1px solid rgba(109, 93, 252, 0.14);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px -18px rgba(0, 0, 0, 0.7);
+  overflow: hidden;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  animation: desk-fade-in 0.25s ease both;
 }
 
-/* Monospace for inline code and fenced blocks (diffs, patches). */
-.message-content code,
-.message-content pre {
-  font-family: "Cascadia Code", "JetBrains Mono", Consolas, "SF Mono", monospace;
+/* Branded gradient top accent on every card */
+.message-content::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--desk-gradient);
+  opacity: 0.85;
+  pointer-events: none;
 }
 
-.message-content pre {
-  border-radius: 10px;
-  border: 1px solid rgba(109, 93, 252, 0.18);
+.message-content:hover {
+  transform: translateY(-1px);
+  border-color: var(--desk-border-strong);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4), 0 14px 32px -18px rgba(0, 0, 0, 0.8);
 }
 
-/* Severity accents for the markdown badge lines inside finding cards. */
-.message-content strong {
+@keyframes desk-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-content,
+  .message-content:hover {
+    animation: none;
+    transition: none;
+    transform: none;
+  }
+}
+
+/* ---------- Typography hierarchy ---------- */
+
+.message-content h1,
+.message-content h2,
+.message-content h3 {
+  font-family: var(--desk-font);
+  letter-spacing: -0.015em;
+  color: var(--desk-text);
+}
+
+.message-content h1 {
+  font-size: 1.45rem;
+  border-bottom: 1px solid var(--desk-border);
+  padding-bottom: 0.4rem;
+}
+
+.message-content h2 {
+  font-size: 1.2rem;
+}
+
+.message-content h3 {
+  font-size: 1.05rem;
+}
+
+.message-content p,
+.message-content li {
+  line-height: 1.6;
+}
+
+.message-content em {
+  color: var(--desk-text-muted);
+}
+
+/* ---------- Pills & chips (inline code) ---------- */
+
+.message-content code {
+  font-family: var(--desk-mono);
+  font-size: 0.82em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(245, 158, 11, 0.12); /* --desk-major tint */
+  color: var(--desk-major);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 999px;
+  padding: 0.1em 0.6em;
+  white-space: nowrap;
+}
+
+/* CRITICAL pill: bold-wrapped code */
+.message-content strong > code {
+  background: rgba(239, 68, 68, 0.13); /* --desk-critical tint */
+  color: var(--desk-critical);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+/* MINOR pill and file:line chips: italic-wrapped code (quiet info hue) */
+.message-content em > code {
+  background: rgba(56, 189, 248, 0.11); /* --desk-minor tint */
+  color: var(--desk-minor);
+  border-color: rgba(56, 189, 248, 0.25);
+  text-transform: none;
   letter-spacing: 0.01em;
 }
 
-/* Blockquote footnotes (partial-review reasons) read as marginalia. */
-.message-content blockquote {
-  border-left: 3px solid var(--desk-major);
-  padding-left: 0.75rem;
-  opacity: 0.92;
-  font-size: 0.95em;
+/* Fenced code blocks: full-width panels, not pills */
+.message-content pre {
+  background: var(--desk-panel-raised);
+  border: 1px solid var(--desk-border);
+  border-radius: 12px;
 }
 
-/* Measurement tables (the FR-10 footer) get a tidy header accent. */
+.message-content pre code {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  color: var(--desk-text);
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: pre;
+}
+
+/* ---------- Lists ---------- */
+
+.message-content li::marker {
+  color: var(--desk-accent);
+}
+
+/* ---------- Blockquote footnotes (partial-review warnings) ---------- */
+
+.message-content blockquote {
+  border-left: 3px solid var(--desk-major);
+  background: rgba(245, 158, 11, 0.07);
+  border-radius: 0 var(--desk-radius-sm) var(--desk-radius-sm) 0;
+  padding: 0.5rem 0.9rem;
+  margin: 0.6rem 0;
+  color: var(--desk-text);
+}
+
+.message-content blockquote em {
+  color: var(--desk-major);
+}
+
+/* ---------- Tables (measurements footer) ---------- */
+
 .message-content table {
   border-collapse: collapse;
+  width: 100%;
+  font-size: 0.92em;
 }
 
 .message-content table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.85em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--desk-text-muted);
+  background: var(--desk-accent-soft);
   border-bottom: 2px solid var(--desk-accent);
+  padding: 0.45rem 0.75rem;
+}
+
+.message-content table td {
+  border-bottom: 1px solid var(--desk-border);
+  padding: 0.45rem 0.75rem;
+}
+
+.message-content table tr:last-child td {
+  border-bottom: none;
+}
+
+/* Numeric columns (latency/tokens) right-aligned with tabular figures;
+   the footer markdown right-aligns them, the CSS reinforces it. */
+.message-content table td:nth-child(n + 2) {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--desk-mono);
+  font-size: 0.9em;
+}
+
+/* ---------- Dividers ---------- */
+
+.message-content hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--desk-border-strong),
+    transparent
+  );
+  margin: 1rem 0;
 }
