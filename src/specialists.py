@@ -51,6 +51,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any
 
 from agents import (
     Agent,
@@ -486,13 +487,30 @@ merge is a deterministic function the model merely performs.
 """
 
 
+async def _merge_tool_output_extractor(result: Any) -> str:
+    """Render the merge tool's nested-run result as JSON for the Desk.
+
+    Without this the Desk receives the Python ``repr`` of the merged findings
+    list; with it, the Desk receives the merged findings as a JSON array it can
+    quote verbatim in the report.
+    """
+    final_output = getattr(result, "final_output", None)
+    if isinstance(final_output, list):
+        try:
+            return json.dumps([f.model_dump(mode="json") for f in final_output])
+        except Exception:  # noqa: BLE001 - fall back to str, never raise (NFR-4)
+            pass
+    return str(final_output)
+
+
 def make_merge_tool() -> FunctionTool:
     """The Desk's ``merge_findings`` tool: MergeSpecialist via ``as_tool``.
 
     Typed parameters (``findings`` array, no context wrapper) and an input
     builder that hands the array to the specialist as JSON text. The nested run
     carries this module's output guardrail, so a tool-level result is checked
-    too (AD-6).
+    too (AD-6). The custom output extractor hands the merged list back to the
+    Desk as JSON text (not a Python repr).
     """
     return merge_specialist.as_tool(
         tool_name="merge_findings",
@@ -502,6 +520,7 @@ def make_merge_tool() -> FunctionTool:
         ),
         parameters=MergeToolInput,
         input_builder=_merge_tool_input_builder,
+        custom_output_extractor=_merge_tool_output_extractor,
     )
 
 
