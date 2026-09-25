@@ -138,6 +138,10 @@ def _api_error(status: int, message: str) -> openai.APIStatusError:
         return openai.NotFoundError(message, response=response, body=None)
     if status == 401:
         return openai.AuthenticationError(message, response=response, body=None)
+    if status == 400:
+        return openai.BadRequestError(message, response=response, body=None)
+    if status >= 500:
+        return openai.InternalServerError(message, response=response, body=None)
     return openai.APIStatusError(message, response=response, body=None)
 
 
@@ -343,6 +347,111 @@ async def test_model_not_found_404_triggers_failover():
     assert response is answer
     assert model.switch_count == 1
     assert model.is_cooling(CHAIN_A) is True
+
+
+def test_is_failover_trigger_covers_availability_layers():
+    """Unit view of the trigger table: 5xx-availability and connection
+    failures trigger, 4xx request problems never do (404 is the exception)."""
+    assert model_config.is_failover_trigger(_api_error(429, "quota exceeded")) is True
+    assert model_config.is_failover_trigger(_api_error(404, "model gone")) is True
+    assert model_config.is_failover_trigger(_api_error(500, "server error")) is True
+    assert model_config.is_failover_trigger(
+        _api_error(
+            503,
+            "This model is currently experiencing high demand "
+            "[UNAVAILABLE]. Please try again later.",
+        )
+    ) is True
+    request = httpx2.Request("POST", "https://generativelanguage.googleapis.com/v1beta/openai")
+    assert model_config.is_failover_trigger(openai.APIConnectionError(request=request)) is True
+    assert model_config.is_failover_trigger(openai.APITimeoutError(request=request)) is True
+    assert model_config.is_failover_trigger(_api_error(400, "bad request")) is False
+    assert model_config.is_failover_trigger(_api_error(401, "bad key")) is False
+    assert model_config.is_failover_trigger(_api_error(422, "unprocessable")) is False
+
+
+async def test_503_availability_error_switches_to_next_chain_model():
+    """A provider-availability 5xx (high demand / UNAVAILABLE) must advance
+    the chain exactly like a rate limit: switch, cooldown, usage recorded."""
+    overloaded = _api_error(
+        503,
+        "This model is currently experiencing high demand "
+        "[UNAVAILABLE]. Please try again later.",
+    )
+    first_answer, second_answer = _ok_response("resp-1"), _ok_response("resp-2")
+    model, stubs = _failover(
+        {CHAIN_A: [overloaded, first_answer], CHAIN_B: [second_answer, first_answer]}
+    )
+
+    response = await _call(model)
+
+    assert response is second_answer  # the switched model answered
+    assert len(stubs[CHAIN_A].calls) == 1  # exactly one failed attempt
+    assert len(stubs[CHAIN_B].calls) == 1
+    assert model.switch_count == 1
+    assert model.current_name == CHAIN_B
+    assert model.is_cooling(CHAIN_A) is True
+    assert model.usage["per_model"][CHAIN_A] == {"requests": 1, "succeeded": 0, "failed": 1}
+
+
+async def test_connection_and_timeout_errors_trigger_failover():
+    """APIConnectionError and its APITimeoutError subclass are provider-side
+    availability failures: the chain advances and nothing propagates."""
+    request = httpx2.Request(
+        "POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
+    for connection_error in (
+        openai.APIConnectionError(request=request),
+        openai.APITimeoutError(request=request),
+    ):
+        model, stubs = _failover(
+            {CHAIN_A: [connection_error], CHAIN_B: [_ok_response("resp-conn")]}
+        )
+
+        response = await _call(model)
+
+        assert response.response_id == "resp-conn"  # the next model answered
+        assert model.switch_count == 1
+        assert model.is_cooling(CHAIN_A) is True
+        assert stubs[CHAIN_B].calls == ["review this diff"]
+
+
+async def test_bad_request_400_does_not_switch_chain_models():
+    """400 BadRequestError is a request problem: it propagates immediately —
+    no switch, no cooldown, no wasted attempt on the next model."""
+    bad_request = _api_error(
+        400,
+        "Forced function calling (ANY mode) with a response mime type: "
+        "'application/json' is unsupported",
+    )
+    model, stubs = _failover({CHAIN_A: [bad_request], CHAIN_B: [_ok_response("resp-b")]})
+
+    with pytest.raises(openai.BadRequestError):
+        await _call(model)
+
+    assert model.switch_count == 0
+    assert model.current_name == CHAIN_A
+    assert stubs[CHAIN_B].calls == []  # a 400 is never retried on the next model
+    assert model.is_cooling(CHAIN_A) is False
+    assert model.usage["per_model"][CHAIN_A] == {"requests": 1, "succeeded": 0, "failed": 0}
+
+
+async def test_5xx_across_whole_chain_exhausts_it():
+    """Every model 503ing is real unavailability: the chain is exhausted and
+    the raised error names the chain and the last underlying error."""
+    chain = [CHAIN_A, CHAIN_B, CHAIN_C]
+    model, stubs = _failover(
+        {name: [_api_error(503, f"{name} is overloaded")] for name in chain},
+        chain=chain,
+    )
+
+    with pytest.raises(ModelChainExhausted) as excinfo:
+        await _call(model)
+
+    for name in chain:
+        assert len(stubs[name].calls) == 1  # one attempt each, no loops
+    assert all(stat["failed"] == 1 for stat in model.usage["per_model"].values())
+    assert CHAIN_A in str(excinfo.value) and CHAIN_C in str(excinfo.value)
 
 
 async def test_authentication_error_propagates_without_switch():

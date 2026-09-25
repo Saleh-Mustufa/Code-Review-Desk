@@ -18,7 +18,13 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    RateLimitError,
+)
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from agents import (
@@ -88,7 +94,11 @@ class ModelChainExhausted(AgentsException):
 
 
 # Status codes that mean "this model is unavailable, move down the chain":
-# 429 (rate limit / quota) and 404 (model deprecated for this key).
+# 429 (rate limit / quota), 404 (model deprecated for this key), and any 5xx
+# (5xx-availability: the provider itself is struggling — high demand, 503
+# UNAVAILABLE, server errors — so a different model may be healthy). Other 4xx
+# statuses (400/401/422) are request problems: switching models cannot fix
+# them, so they propagate untouched.
 _FAILOVER_STATUS_CODES = frozenset({429, 404})
 _FAILOVER_CLASS_MARKERS = ("ratelimit", "resourceexhausted")
 _FAILOVER_MESSAGE_MARKERS = (
@@ -99,18 +109,29 @@ _FAILOVER_MESSAGE_MARKERS = (
 )
 
 
+def _is_server_side_status(status: int) -> bool:
+    """Whether a status code is a 5xx server-side (5xx-availability) error."""
+    return 500 <= status <= 599
+
+
 def is_failover_trigger(exc: BaseException) -> bool:
     """Decide whether an error means 'switch to the next model in the chain'.
 
-    Triggers are rate-limit-type failures (429, RateLimitError, quota,
-    ResourceExhausted) and model-not-found (404, the provider deprecates old
-    models for new keys). Anything else (auth, network misuse, bugs) is not
-    recoverable by switching models and is raised untouched.
+    Triggers are availability failures — rate limits (429, RateLimitError,
+    quota, ResourceExhausted), 5xx-availability (InternalServerError 500-599,
+    APIConnectionError, APITimeoutError) — and model-not-found (404, the
+    provider deprecates old models for new keys). Anything else (400/401/422
+    request problems, bugs) is not recoverable by switching models and is
+    raised untouched.
     """
     if isinstance(exc, RateLimitError):
         return True
+    if isinstance(exc, (InternalServerError, APIConnectionError, APITimeoutError)):
+        return True  # 5xx-availability: the provider, not the request
     status = getattr(exc, "status_code", None)
-    if isinstance(status, int) and status in _FAILOVER_STATUS_CODES:
+    if isinstance(status, int) and (
+        status in _FAILOVER_STATUS_CODES or _is_server_side_status(status)
+    ):
         return True
     class_name = type(exc).__name__.lower()
     if any(marker in class_name for marker in _FAILOVER_CLASS_MARKERS):
