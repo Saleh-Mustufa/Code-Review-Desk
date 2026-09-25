@@ -428,7 +428,10 @@ async def run_review(
         (per reviewer, as it lands) plus ``PartialReview`` when a ceiling is
         hit, ``MergedReport``, ``RemediationOffered``, then ``ReviewComplete``
         with the rendered report. On a tripped secret guardrail:
-        ``GuardrailRefused`` then a refused ``ReviewComplete``.
+        ``GuardrailRefused`` then a refused ``ReviewComplete``. A reviewer
+        whose run dies on an unexpected model error lands as a partial
+        outcome (footnote + ``PartialReview``) instead of crashing the
+        review — NFR-4 containment, in both modes.
 
     Raises:
         DiffError: from intake on empty/malformed diffs — callers catch it and
@@ -479,7 +482,9 @@ async def run_review(
                 agent.output_guardrails = [guard_against_secrets]
 
             async def _guarded_reviewer(agent: Any) -> Any:
-                """One reviewer run; a guardrail trip becomes a sentinel value."""
+                """One reviewer run; a guardrail trip becomes a sentinel and a
+                model error becomes a partial outcome (NFR-4: one reviewer's
+                failure must never crash the whole review)."""
                 try:
                     return await run_reviewer(
                         agent,
@@ -490,6 +495,20 @@ async def run_review(
                     )
                 except OutputGuardrailTripwireTriggered as trip:
                     return trip
+                except Exception as exc:  # noqa: BLE001 - NFR-4 containment
+                    # Deliberately NOT BaseException: CancelledError (raised
+                    # when the refusal path cancels stragglers) and
+                    # KeyboardInterrupt/SystemExit still propagate.
+                    return ReviewerOutcome(
+                        reviewer_name=agent.name,
+                        findings=[],
+                        partial=True,
+                        partial_reason=(
+                            f"{agent.name} could not complete its review "
+                            f"({type(exc).__name__}); the review continues "
+                            "without it."
+                        ),
+                    )
 
             refusal_reason: str | None = None
             masked_text: str | None = None
@@ -511,6 +530,21 @@ async def run_review(
                     except OutputGuardrailTripwireTriggered as trip:
                         refusal_reason, masked_text = _refusal_from_trip(trip)
                         break
+                    except Exception as exc:  # noqa: BLE001 - NFR-4 containment
+                        # Same containment as the concurrent path (except
+                        # Exception, so CancelledError still propagates): a
+                        # model error becomes a partial outcome and the loop
+                        # moves on to the next reviewer.
+                        outcome = ReviewerOutcome(
+                            reviewer_name=agent.name,
+                            findings=[],
+                            partial=True,
+                            partial_reason=(
+                                f"{agent.name} could not complete its review "
+                                f"({type(exc).__name__}); the review continues "
+                                "without it."
+                            ),
+                        )
                     outcomes.append(outcome)
                     yield FindingsLanded(
                         reviewer=outcome.reviewer_name,

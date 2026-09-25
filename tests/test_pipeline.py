@@ -507,6 +507,158 @@ async def test_desk_ceiling_falls_back_to_deterministic_merge() -> None:
     assert "No remediation needed" in offered.text
 
 
+# --- NFR-4: a reviewer's model error becomes a partial outcome, not a crash ----
+
+
+@pytest.mark.asyncio
+async def test_reviewer_model_error_becomes_partial_outcome_concurrent(
+    monkeypatch,
+) -> None:
+    """One reviewer dying on an unexpected model error must not crash the
+    review: the others' findings land, the failure is surfaced as a partial
+    outcome with the containment sentence, and the report still completes."""
+    runner = StubRunner(default_reviewer_results())
+    runner.desk_behaviour = lambda agent, input, kwargs: desk_result()
+    real_run_reviewer = pipeline_module.run_reviewer
+
+    async def flaky_run_reviewer(agent, diff, ctx, **kwargs):
+        if agent.name == "StyleReviewer":
+            raise RuntimeError("provider 400: forced function calling unsupported")
+        return await real_run_reviewer(agent, diff, ctx, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "run_reviewer", flaky_run_reviewer)
+
+    events = await collect(
+        run_review(DIFF, make_ctx(), runner=runner, reviewers_factory=stub_reviewers)
+    )
+    types = [type(event).__name__ for event in events]
+    assert types[-3:] == ["MergedReport", "RemediationOffered", "ReviewComplete"]
+    assert "GuardrailRefused" not in types
+
+    landed = {
+        event.reviewer: event for event in events if isinstance(event, FindingsLanded)
+    }
+    assert [f.message for f in landed["SecurityReviewer"].findings] != []  # healthy
+    assert landed["StyleReviewer"].partial is True
+    assert landed["StyleReviewer"].findings == []
+    assert "could not complete its review (RuntimeError)" in (
+        landed["StyleReviewer"].partial_reason or ""
+    )
+    assert "the review continues without it" in (
+        landed["StyleReviewer"].partial_reason or ""
+    )
+
+    partials = [event for event in events if isinstance(event, PartialReview)]
+    assert len(partials) == 1 and partials[0].reviewer == "StyleReviewer"
+    report = events[-1].report
+    assert any("StyleReviewer" in note for note in report.footnotes)
+    # The healthy reviewers' findings still merged (Style contributed nothing).
+    assert [(f.severity, f.file, f.line) for f in report.findings] == [
+        ("critical", "app.py", 42),
+        ("minor", "app.py", 7),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reviewer_model_error_becomes_partial_outcome_sequential(
+    monkeypatch,
+) -> None:
+    """Same containment in the sequential branch: the failed reviewer becomes
+    a partial outcome and the loop continues to the next reviewer."""
+    runner = StubRunner(default_reviewer_results())
+    runner.desk_behaviour = lambda agent, input, kwargs: desk_result()
+    real_run_reviewer = pipeline_module.run_reviewer
+
+    async def flaky_run_reviewer(agent, diff, ctx, **kwargs):
+        if agent.name == "TestsReviewer":
+            raise RuntimeError("provider 400")
+        return await real_run_reviewer(agent, diff, ctx, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "run_reviewer", flaky_run_reviewer)
+
+    events = await collect(
+        run_review(
+            DIFF,
+            make_ctx(),
+            runner=runner,
+            reviewers_factory=stub_reviewers,
+            mode="sequential",
+        )
+    )
+    types = [type(event).__name__ for event in events]
+    assert types[-3:] == ["MergedReport", "RemediationOffered", "ReviewComplete"]
+
+    landed = [event for event in events if isinstance(event, FindingsLanded)]
+    assert [event.reviewer for event in landed] == [
+        "SecurityReviewer",
+        "TestsReviewer",
+        "StyleReviewer",
+    ]
+    assert landed[1].partial is True
+    assert "could not complete its review (RuntimeError)" in (
+        landed[1].partial_reason or ""
+    )
+    # The loop continued: Style landed normally after the mid-roster failure.
+    assert landed[2].partial is False and landed[2].findings
+
+    report = events[-1].report
+    assert any("TestsReviewer" in note for note in report.footnotes)
+    assert [(f.severity, f.file, f.line) for f in report.findings] == [
+        ("critical", "app.py", 42),
+        ("minor", "app.py", 7),
+        ("minor", "util.py", 3),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reviewer_guardrail_trip_still_refuses_despite_containment(
+    monkeypatch,
+) -> None:
+    """The NFR-4 containment must not swallow a guardrail trip: the trip
+    branch is checked first, so the review is refused, never partialled."""
+    real_run_reviewer = pipeline_module.run_reviewer
+
+    async def tripping_run_reviewer(agent, diff, ctx, **kwargs):
+        if agent.name == "SecurityReviewer":
+            registry = current_secrets.get()
+            planted = registry.patterns if registry else []
+            text = f"quoted {planted[0]}" if planted else "clean"
+            raise OutputGuardrailTripwireTriggered(
+                OutputGuardrailResult(
+                    guardrail=secret_guardrail,
+                    agent_output=text,
+                    agent=agent,
+                    output=GuardrailFunctionOutput(
+                        output_info={
+                            "reason": "quoted a credential; refused.",
+                            "matches": ["API_***"],
+                        },
+                        tripwire_triggered=True,
+                    ),
+                )
+            )
+        return await real_run_reviewer(agent, diff, ctx, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "run_reviewer", tripping_run_reviewer)
+
+    for mode in ("concurrent", "sequential"):
+        runner = StubRunner(default_reviewer_results())
+        events = await collect(
+            run_review(
+                DIFF,
+                make_ctx(),
+                runner=runner,
+                reviewers_factory=stub_reviewers,
+                mode=mode,
+            )
+        )
+        types = [type(event).__name__ for event in events]
+        assert types[-2:] == ["GuardrailRefused", "ReviewComplete"], mode
+        assert "PartialReview" not in types, mode
+        report = events[-1].report
+        assert report.refused is True and report.findings == []
+
+
 # --- FR-6: remediation handoff surfaces as an event ------------------------------
 
 
